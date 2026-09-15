@@ -2,8 +2,13 @@ import { NodeConnectionTypes, type INodeType, type INodeTypeDescription } from '
 
 import { getConversations } from './listSearch/getConversations';
 import { getUsers } from './listSearch/getUsers';
+import { calendarEventDescription } from './resources/calendarEvent';
 import { chatDescription } from './resources/chat';
+import { notificationDescription } from './resources/notification';
+import { postDescription } from './resources/post';
+import { taskDescription } from './resources/task';
 import { userDescription } from './resources/user';
+import { wikiDescription } from './resources/wiki';
 
 export class KibiConnect implements INodeType {
 	description: INodeTypeDescription = {
@@ -46,20 +51,50 @@ export class KibiConnect implements INodeType {
 				noDataExpression: true,
 				options: [
 					{
+						name: 'Calendar Event',
+						value: 'calendarEvent',
+						description: 'Appointments and meetings',
+					},
+					{
 						name: 'Chat',
 						value: 'chat',
 						description: 'Send and read messages, react to them',
+					},
+					{
+						name: 'Notification',
+						value: 'notification',
+						description: "Notify people through Kibi's own delivery rules",
+					},
+					{
+						name: 'Post',
+						value: 'post',
+						description: 'News and announcements in the feed',
+					},
+					{
+						name: 'Task',
+						value: 'task',
+						description: 'Work items on a board',
 					},
 					{
 						name: 'User',
 						value: 'user',
 						description: 'Look people up in the employee directory',
 					},
+					{
+						name: 'Wiki Page',
+						value: 'wiki',
+						description: 'Knowledge base pages',
+					},
 				],
 				default: 'chat',
 			},
+			...calendarEventDescription,
 			...chatDescription,
+			...notificationDescription,
+			...postDescription,
+			...taskDescription,
 			...userDescription,
+			...wikiDescription,
 		],
 	};
 

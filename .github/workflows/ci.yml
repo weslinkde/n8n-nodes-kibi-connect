@@ -56,10 +56,18 @@ jobs:
 
           patterns='(kbc_|kbw_|kbi_)[A-Za-z0-9]{12,}|sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{10,}|AKIA[0-9A-Z]{16}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|cloud-workstation|k3s-[a-z0-9-]+|\.internal\b|(^|[^0-9.])10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}'
 
-          # package-lock.json is excluded: it is generated, it legitimately
-          # contains long opaque integrity hashes, and it is not where a secret
-          # would hide without also being somewhere else.
-          if git grep -nIE "$patterns" $(git rev-list --all) -- ':!package-lock.json' > /tmp/leaks.txt 2>/dev/null; then
+          # Two exclusions, both load-bearing:
+          #
+          # package-lock.json is generated, legitimately full of long opaque
+          # integrity hashes, and not somewhere a secret hides without also
+          # being somewhere else.
+          #
+          # This file excludes itself because the pattern list above IS a list
+          # of the strings being searched for — without this the check finds
+          # its own definition and fails every run, which is the fastest way to
+          # teach a team to ignore it.
+          if git grep -nIE "$patterns" $(git rev-list --all) \
+               -- ':!package-lock.json' ':!.github/workflows/ci.yml' > /tmp/leaks.txt 2>/dev/null; then
             echo "Possible secret or internal hostname found in the history:"
             cat /tmp/leaks.txt
             exit 1
