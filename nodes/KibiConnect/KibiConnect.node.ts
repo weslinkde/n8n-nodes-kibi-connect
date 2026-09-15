@@ -1,5 +1,8 @@
 import { NodeConnectionTypes, type INodeType, type INodeTypeDescription } from 'n8n-workflow';
 
+import { getConversations } from './listSearch/getConversations';
+import { getUsers } from './listSearch/getUsers';
+import { chatDescription } from './resources/chat';
 import { userDescription } from './resources/user';
 
 export class KibiConnect implements INodeType {
@@ -13,7 +16,7 @@ export class KibiConnect implements INodeType {
 		group: ['input'],
 		version: 1,
 		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
-		description: 'Read and write posts, wiki pages, tasks, calendar events and more in Kibi Connect',
+		description: 'Read and write chat, posts, wiki pages, tasks and calendar events in Kibi Connect',
 		defaults: {
 			name: 'Kibi Connect',
 		},
@@ -26,8 +29,8 @@ export class KibiConnect implements INodeType {
 				required: true,
 			},
 		],
-		// The base URL is per tenant, so it comes from the credential rather
-		// than being baked in here — every customer has their own host.
+		// The base URL is per tenant and comes from the credential: every
+		// customer has their own host, so there is nothing to bake in here.
 		requestDefaults: {
 			baseURL: '={{$credentials.baseUrl}}/api/v1',
 			headers: {
@@ -43,13 +46,30 @@ export class KibiConnect implements INodeType {
 				noDataExpression: true,
 				options: [
 					{
+						name: 'Chat',
+						value: 'chat',
+						description: 'Send and read messages, react to them',
+					},
+					{
 						name: 'User',
 						value: 'user',
+						description: 'Look people up in the employee directory',
 					},
 				],
-				default: 'user',
+				default: 'chat',
 			},
+			...chatDescription,
 			...userDescription,
 		],
+	};
+
+	// Searchable pickers. They exist so that nobody has to paste a 26-character
+	// ULID by hand — and so that the ID a workflow ends up carrying came from
+	// the API rather than from a transcription.
+	methods = {
+		listSearch: {
+			getUsers,
+			getConversations,
+		},
 	};
 }

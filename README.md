@@ -1,7 +1,8 @@
 # n8n-nodes-kibi-connect
 
-An [n8n](https://n8n.io) community node for [Kibi Connect](https://kibi.de), the German
-workplace collaboration platform — chat, feed, wiki, tasks, calendar, files and time tracking.
+An [n8n](https://n8n.io) community node for [Kibi Connect](https://kibi.de) — the European
+workplace collaboration platform, made in Germany. Chat, feed, wiki, tasks, calendar, files
+and time tracking, with data kept in the EU.
 
 > **Work in progress.** The package currently ships the credential and the User resource.
 > The remaining resources and the webhook trigger are being added.
