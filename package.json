@@ -1,0 +1,60 @@
+{
+	"name": "n8n-nodes-kibi-connect",
+	"version": "0.1.0",
+	"description": "Automate Kibi Connect \u2014 chat, feed, wiki, tasks, calendar, files and time tracking \u2014 plus a webhook trigger",
+	"license": "MIT",
+	"homepage": "https://github.com/weslinkde/n8n-nodes-kibi-connect",
+	"keywords": [
+		"n8n-community-node-package",
+		"kibi",
+		"kibi-connect",
+		"weslink",
+		"collaboration",
+		"intranet"
+	],
+	"author": {
+		"name": "Weslink GmbH",
+		"email": "dev@weslink.eu",
+		"url": "https://weslink.de"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/weslinkde/n8n-nodes-kibi-connect.git"
+	},
+	"bugs": {
+		"url": "https://github.com/weslinkde/n8n-nodes-kibi-connect/issues"
+	},
+	"engines": {
+		"node": ">=20.19"
+	},
+	"scripts": {
+		"build": "n8n-node build",
+		"dev": "n8n-node dev",
+		"lint": "n8n-node lint",
+		"lint:fix": "n8n-node lint --fix",
+		"release": "n8n-node release",
+		"prepublishOnly": "n8n-node prerelease"
+	},
+	"files": [
+		"dist"
+	],
+	"n8n": {
+		"n8nNodesApiVersion": 1,
+		"strict": true,
+		"credentials": [
+			"dist/credentials/KibiConnectApi.credentials.js"
+		],
+		"nodes": [
+			"dist/nodes/KibiConnect/KibiConnect.node.js"
+		]
+	},
+	"devDependencies": {
+		"@n8n/node-cli": "^0.46.4",
+		"eslint": "^9.29.0",
+		"prettier": "^3.6.0",
+		"typescript": "^5.9.0"
+	},
+	"peerDependencies": {
+		"n8n-workflow": "*"
+	}
+}

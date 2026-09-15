@@ -1,0 +1,18 @@
+{
+	"node": "n8n-nodes-kibi-connect.kibiConnect",
+	"nodeVersion": "1.0",
+	"codexVersion": "1.0",
+	"categories": ["Communication", "Productivity"],
+	"resources": {
+		"credentialDocumentation": [
+			{
+				"url": "https://github.com/weslinkde/n8n-nodes-kibi-connect#credentials"
+			}
+		],
+		"primaryDocumentation": [
+			{
+				"url": "https://github.com/weslinkde/n8n-nodes-kibi-connect#readme"
+			}
+		]
+	}
+}
