@@ -1,5 +1,5 @@
 {
-	"node": "n8n-nodes-kibi-connect.kibiConnect",
+	"node": "@weslink/n8n-nodes-kibi-connect.kibiConnect",
 	"nodeVersion": "1.0",
 	"codexVersion": "1.0",
 	"categories": ["Communication", "Productivity"],

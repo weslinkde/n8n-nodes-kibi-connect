@@ -1,5 +1,5 @@
 {
-	"name": "n8n-nodes-kibi-connect",
+	"name": "@weslink/n8n-nodes-kibi-connect",
 	"version": "0.1.0",
 	"description": "Automate Kibi Connect \u2014 chat, feed, wiki, tasks, calendar events, notifications and users",
 	"license": "MIT",

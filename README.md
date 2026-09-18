@@ -1,4 +1,4 @@
-# n8n-nodes-kibi-connect
+# @weslink/n8n-nodes-kibi-connect
 
 An [n8n](https://n8n.io) community node for [Kibi Connect](https://kibi.de) — the European
 workplace collaboration platform, made in Germany. Chat, feed, wiki, tasks, calendar, files
@@ -10,7 +10,8 @@ and time tracking, with data kept in the EU.
 
 ## Installation
 
-Follow the [community node installation guide](https://docs.n8n.io/integrations/community-nodes/installation/).
+Follow the [community node installation guide](https://docs.n8n.io/integrations/community-nodes/installation/)
+and enter `@weslink/n8n-nodes-kibi-connect` as the package name.
 
 ## Credentials
 
