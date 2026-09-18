@@ -1,7 +1,7 @@
 {
 	"name": "n8n-nodes-kibi-connect",
 	"version": "0.1.0",
-	"description": "Automate Kibi Connect \u2014 chat, feed, wiki, tasks, calendar, files and time tracking \u2014 plus a webhook trigger",
+	"description": "Automate Kibi Connect \u2014 chat, feed, wiki, tasks, calendar events, notifications and users",
 	"license": "MIT",
 	"homepage": "https://github.com/weslinkde/n8n-nodes-kibi-connect",
 	"keywords": [
