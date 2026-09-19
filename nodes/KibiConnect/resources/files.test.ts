@@ -60,34 +60,30 @@ describe('pagination', () => {
 		(p) => p.name === 'returnAll',
 	);
 
-	// The routing engine only pages when `send.paginate` is set — the
-	// pagination block alone does nothing.
-	it('switches paging on through the Return All value', () => {
+	// The walk over the pages lives in kibiRoutingRequest; the parameter's
+	// job is to ask for the Files API's largest page.
+	it('asks for the largest page the Files API allows when everything is wanted', () => {
 		expect(paginated.length).toBeGreaterThan(0);
 		for (const p of paginated) {
-			expect(p.routing?.send?.paginate).toBe('={{ $value }}');
+			expect(p.routing?.request?.qs).toEqual({ limit: '={{ $value ? 100 : undefined }}' });
+			expect(p.routing?.operations).toBeUndefined();
 		}
 	});
 
-	// The pagination request replaces the query string wholesale, so the
-	// filters have to be carried over explicitly or page two comes back
-	// unfiltered.
-	it('carries the original query string into every page request', () => {
-		for (const p of paginated) {
-			const pagination = p.routing?.operations?.pagination;
-			expect(pagination).toBeDefined();
-			if (pagination === undefined || typeof pagination === 'function') continue;
-			const qs = (pagination.properties as { request: { qs: string } }).request.qs;
-			expect(qs).toContain('...$request.qs');
-			expect(qs).toContain('limit: 100');
-		}
-	});
+	it('paginates the listings and nothing else', () => {
+		const ops = paginated.map(
+			(p) => `${p.displayOptions?.show?.resource}.${p.displayOptions?.show?.operation}`,
+		);
 
-	it('uses the cursor envelope for the share-link listings only', () => {
-		const cursorOps = paginated
-			.filter((p) => JSON.stringify(p.routing?.operations).includes('next_cursor'))
-			.map((p) => `${p.displayOptions?.show?.resource}.${p.displayOptions?.show?.operation}`);
-
-		expect(cursorOps.sort()).toEqual(['shareLink.getAccesses', 'shareLink.getAll']);
+		expect(ops.sort()).toEqual([
+			'file.getActivity',
+			'file.getAll',
+			'file.getRecent',
+			'file.getTrash',
+			'file.search',
+			'folder.getItems',
+			'shareLink.getAccesses',
+			'shareLink.getAll',
+		]);
 	});
 });

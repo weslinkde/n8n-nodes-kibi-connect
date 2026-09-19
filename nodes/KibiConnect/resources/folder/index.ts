@@ -307,5 +307,5 @@ export const folderDescription: INodeProperties[] = [
 		routing: { request: { body: { notify: '={{ $value }}' } } },
 	},
 
-	...filesReturnAll(R, 'getItems', 'page'),
+	...filesReturnAll(R, 'getItems'),
 ];
