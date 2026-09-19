@@ -75,7 +75,10 @@ export function contentFormatField(resource: string, operations: string[]): INod
 		displayName: 'Content Format',
 		name: 'contentFormat',
 		type: 'options',
-		default: 'json',
+		// HTML, not the document tree: a workflow author writes markup or
+		// Markdown in an expression, and a plain string sent as JSON would be
+		// stored as one literal text node.
+		default: 'html',
 		description:
 			'How the rich-text field in this request is written. Kibi stores a document tree; HTML and Markdown are parsed into one on the way in, and anything it has no node for is lost at that point.',
 		options: [
@@ -94,7 +97,7 @@ export function readFormatField(resource: string, operations: string[]): INodePr
 		displayName: 'Read Format',
 		name: 'format',
 		type: 'options',
-		default: 'json',
+		default: 'html',
 		description:
 			'Which shape rich text comes back in. Converting to Markdown or plain text discards formatting Kibi can represent but those cannot.',
 		options: [
@@ -127,7 +130,7 @@ export function changeScanFields(resource: string, operation: string): INodeProp
 			description:
 				'Return only records changed after this moment. Combine with sorting by Updated At and move the watermark forward after each run.',
 			displayOptions: { show },
-			routing: { request: { qs: { updated_since: '={{ $value }}' } } },
+			routing: { request: { qs: { updated_since: '={{ $value || undefined }}' } } },
 		},
 		{
 			displayName: 'Sort By',
