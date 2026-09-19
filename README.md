@@ -224,10 +224,11 @@ A **Kibi Connect** node (Document > Create) uploads every PDF attachment into th
 management system, where Kibi's document intelligence extracts the metadata and files it. A
 second **Kibi Connect** node (Chat > Send Message) then tells the accounting conversation
 which documents arrived. The token needs `files:write` for the upload and `chat:write` for the
-message; the tenant needs the Document Management module. Adapt the IMAP credential and
-folder, the *Input Binary Field* if your mail node names attachments differently
-(`attachment_0`, `attachment_1`, ... is the IMAP node's default), the target *Folder ID* if
-the documents should not land in the DMS root, and the *Conversation* for the summary.
+message; the tenant needs the Document Management module. A small Code node in between turns
+the mail's attachments (`attachment_0`, `attachment_1`, ...) into one item per PDF with the
+file in `data`, so the upload needs no adapting. Adapt the IMAP credential and folder, the
+target *Folder ID* if the documents should not land in the DMS root, and the *Conversation*
+for the summary.
 
 ## Binary data
 
