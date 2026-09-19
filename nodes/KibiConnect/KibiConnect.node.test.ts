@@ -30,12 +30,13 @@ describe('the node description', () => {
 		expect([...covered].sort()).toEqual([...resourceValues].sort());
 	});
 
-	it('covers the whole v1 contract plus the four v2 document reads', () => {
+	it('covers the whole v1 contract, the four v2 document reads and the Files API', () => {
 		const operations = operationProperties.flatMap(
 			(property) => property.options as INodePropertyOptions[],
 		);
 
-		expect(operations).toHaveLength(88);
+		// 84 v1 operations + 4 v2 document reads + 41 Files API operations
+		expect(operations).toHaveLength(129);
 	});
 
 	// The community-node linter checks each of these too, but it runs on the
@@ -87,16 +88,22 @@ describe('the node description', () => {
 		expect(resourceValues).toContain('document');
 	});
 
-	it('sends the v2 document reads to the v2 base URL and everything else to v1', () => {
+	it('sends the v2 document reads and the Files API to the v2 base URL and everything else to v1', () => {
 		expect(description.requestDefaults?.baseURL).toBe('={{$credentials.baseUrl}}/api/v1');
 
-		const v2 = ['fulltextSearch', 'getRecent', 'getDocTypes', 'getInbox'];
+		const v2DocumentReads = ['fulltextSearch', 'getRecent', 'getDocTypes', 'getInbox'];
+		const v2Resources = ['file', 'folder', 'shareLink'];
 
 		for (const property of operationProperties) {
+			const resource = (property.displayOptions?.show?.resource as string[])[0];
+
 			for (const option of property.options as INodePropertyOptions[]) {
 				const baseURL = (option.routing?.request as { baseURL?: string } | undefined)?.baseURL;
 
-				if (v2.includes(option.value as string)) {
+				if (
+					v2Resources.includes(resource) ||
+					(resource === 'document' && v2DocumentReads.includes(option.value as string))
+				) {
 					expect(baseURL).toBe('={{$credentials.baseUrl}}/api/v2');
 				} else {
 					expect(baseURL, `${option.value} overrides the base URL`).toBeUndefined();
@@ -114,7 +121,13 @@ describe('the node description', () => {
 				),
 			);
 
-		expect(downloads.map((option) => option.value).sort()).toEqual(['download', 'getMedia']);
+		// Document Download, File Download, File Download Version, Shared Wiki Get Media
+		expect(downloads.map((option) => option.value).sort()).toEqual([
+			'download',
+			'download',
+			'downloadVersion',
+			'getMedia',
+		]);
 
 		for (const option of downloads) {
 			const request = option.routing?.request as Record<string, unknown>;
@@ -136,7 +149,8 @@ describe('the node description', () => {
 				})),
 		);
 
-		expect(uploads).toHaveLength(2);
+		// Document Create, File Upload, Media Upload
+		expect(uploads).toHaveLength(3);
 
 		for (const { resource, operation } of uploads) {
 			const field = properties.find(
