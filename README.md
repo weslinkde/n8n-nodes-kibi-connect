@@ -5,8 +5,8 @@ workplace collaboration platform, made in Germany. Chat, feed, wiki, tasks, cale
 and time tracking, with data kept in the EU.
 
 > **Early release.** The package currently ships the credential and the resources
-> Calendar Event, Chat, Notification, Post, Task, User and Wiki. Documents, time
-> tracking and the webhook trigger are being added.
+> Calendar Event, Chat, File, Folder, Notification, Post, Share Link, Task, User and Wiki.
+> Time tracking and the webhook trigger are being added.
 
 ## Installation
 
@@ -28,6 +28,21 @@ The credential takes three fields:
 | Integration Slug | Only the trigger node needs it. Chosen when the token is created and immutable afterwards. |
 
 The REST API also has to be switched on for the tenant, under **Administration > API**.
+
+## Files
+
+The File, Folder and Share Link resources talk to the Files API (`/api/v2/files`) and need
+the `files:read` scope for reads and `files:write` for writes. A few things worth knowing:
+
+- **Upload** sends the binary property of the input item in one request, which the API
+  accepts up to 64 MiB. Larger files need the chunked upload flow, which the node does not
+  implement.
+- **Download** streams the bytes through the authenticated endpoint rather than following
+  the redirect to object storage, so the token never leaves your tenant's domain. **Get
+  Access URL** mints a short-lived direct URL for consumers that cannot send the token.
+- Files and folders the token owner cannot see answer 404, exactly like unknown IDs.
+- Deleting a **folder** destroys the binaries of everything inside it; the entries show up
+  in the trash but cannot be restored. Deleting a **file** only moves it to the trash.
 
 ## Compatibility
 

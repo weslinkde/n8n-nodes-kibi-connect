@@ -4,8 +4,11 @@ import { getConversations } from './listSearch/getConversations';
 import { getUsers } from './listSearch/getUsers';
 import { calendarEventDescription } from './resources/calendarEvent';
 import { chatDescription } from './resources/chat';
+import { fileDescription } from './resources/file';
+import { folderDescription } from './resources/folder';
 import { notificationDescription } from './resources/notification';
 import { postDescription } from './resources/post';
+import { shareLinkDescription } from './resources/shareLink';
 import { taskDescription } from './resources/task';
 import { userDescription } from './resources/user';
 import { wikiDescription } from './resources/wiki';
@@ -21,7 +24,8 @@ export class KibiConnect implements INodeType {
 		group: ['input'],
 		version: 1,
 		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
-		description: 'Read and write chat, posts, wiki pages, tasks and calendar events in Kibi Connect',
+		description:
+			'Read and write chat, posts, wiki pages, tasks, calendar events, files and folders in Kibi Connect',
 		defaults: {
 			name: 'Kibi Connect',
 		},
@@ -61,6 +65,16 @@ export class KibiConnect implements INodeType {
 						description: 'Send and read messages, react to them',
 					},
 					{
+						name: 'File',
+						value: 'file',
+						description: 'Files in the file manager — needs the files:read / files:write scopes',
+					},
+					{
+						name: 'Folder',
+						value: 'folder',
+						description: 'Folders of the file manager — needs the files:read / files:write scopes',
+					},
+					{
 						name: 'Notification',
 						value: 'notification',
 						description: "Notify people through Kibi's own delivery rules",
@@ -69,6 +83,11 @@ export class KibiConnect implements INodeType {
 						name: 'Post',
 						value: 'post',
 						description: 'News and announcements in the feed',
+					},
+					{
+						name: 'Share Link',
+						value: 'shareLink',
+						description: 'Public links to files and folders — needs the files:read / files:write scopes',
 					},
 					{
 						name: 'Task',
@@ -90,8 +109,11 @@ export class KibiConnect implements INodeType {
 			},
 			...calendarEventDescription,
 			...chatDescription,
+			...fileDescription,
+			...folderDescription,
 			...notificationDescription,
 			...postDescription,
+			...shareLinkDescription,
 			...taskDescription,
 			...userDescription,
 			...wikiDescription,
