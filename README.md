@@ -4,9 +4,14 @@ An [n8n](https://n8n.io) community node for [Kibi Connect](https://kibi.de) — 
 workplace collaboration platform, made in Germany. Chat, feed, wiki, tasks, calendar, files
 and time tracking, with data kept in the EU.
 
-> **Early release.** The package currently ships the credential and the resources
-> Calendar Event, Chat, File, Folder, Notification, Post, Share Link, Task, User and Wiki.
-> Time tracking and the webhook trigger are being added.
+> **Early release.** The package ships the credential and the resources Calendar Event,
+> Call Link, Chat, Document, Group, Media, Notification, Post, Search, Shared Wiki, Survey,
+> Task, Time Tracking, User and Wiki Page — every operation of the v1 REST API plus the v2
+> document reads — and File, Folder and Share Link on the Files API. The webhook trigger is
+> being added.
+>
+> Document and Time Tracking need their module installed in the tenant: Kibi answers 404
+> for every route of a module that is not installed, the same answer an unknown ID gets.
 
 ## Installation
 

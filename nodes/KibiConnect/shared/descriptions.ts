@@ -16,6 +16,20 @@ export const unwrapData: PostReceiveAction[] = [
 ];
 
 /**
+ * A stand-in item for an operation whose success answer carries no body.
+ *
+ * A 204 leaves the routing layer with an empty string where an object should
+ * be, and an item whose `json` is a string breaks the next node. Emitting a
+ * small object instead keeps the workflow moving and says what happened.
+ */
+export const emptySuccess: PostReceiveAction[] = [
+	{
+		type: 'set',
+		properties: { value: '={{ { "success": true } }}' },
+	},
+];
+
+/**
  * The `Return All` / `Limit` pair for a list operation.
  *
  * Kibi paginates with `page` and `limit` and reports `meta.current_page` and
