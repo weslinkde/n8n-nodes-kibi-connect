@@ -258,8 +258,8 @@ what it was handed.
 
 - n8n 1.x.
 - A Kibi Connect tenant with the REST API enabled (**Administration > API**).
-- Automatic webhook registration requires the Kibi Connect release that ships the
-  `/api/v1/webhook-endpoints` routes (planned for **6.8.0**). Manual mode works with any
+- Automatic webhook registration requires Kibi Connect **6.8.0** or newer — the
+  `/api/v1/webhook-endpoints` routes ship with that release. Manual mode works with any
   version that has outgoing webhooks.
 - The File, Folder and Share Link resources, and the Document resource's fulltext search,
   recent, inbox and doc-type reads, need a Kibi Connect version with the Files API V2 (6.x).
