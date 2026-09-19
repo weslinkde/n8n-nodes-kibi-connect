@@ -1,0 +1,61 @@
+{
+  "name": "Announce new posts in chat",
+  "nodes": [
+    {
+      "parameters": {
+        "autoRegister": true,
+        "events": [
+          "post.created"
+        ],
+        "ignoreOwnWrites": true
+      },
+      "name": "New post in Kibi",
+      "type": "@weslink/n8n-nodes-kibi-connect.kibiConnectTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "kibi-announce-posts"
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "sendMessage",
+        "conversationId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": ""
+        },
+        "body": "=New post in the feed: {{ $json.data.title }}\n{{ $json.data.url ?? \"\" }}"
+      },
+      "name": "Announce in chat",
+      "type": "@weslink/n8n-nodes-kibi-connect.kibiConnect",
+      "typeVersion": 1,
+      "position": [
+        300,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "New post in Kibi": {
+      "main": [
+        [
+          {
+            "node": "Announce in chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

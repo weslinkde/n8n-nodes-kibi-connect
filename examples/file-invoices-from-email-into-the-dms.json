@@ -1,0 +1,105 @@
+{
+  "name": "File invoices from email into the DMS",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {}
+      },
+      "name": "Invoice mailbox (IMAP)",
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One item per PDF attachment, so the DMS gets one document each.\nconst out = [];\nfor (const item of $input.all()) {\n  for (const [key, file] of Object.entries(item.binary ?? {})) {\n    if (file.mimeType === 'application/pdf') {\n      out.push({ json: { subject: item.json.subject, from: item.json.from, fileName: file.fileName }, binary: { data: file } });\n    }\n  }\n}\nreturn out;"
+      },
+      "name": "One item per PDF",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        300,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "document",
+        "operation": "create",
+        "binaryPropertyName": "data",
+        "folderUlid": ""
+      },
+      "name": "File in the DMS",
+      "type": "@weslink/n8n-nodes-kibi-connect.kibiConnect",
+      "typeVersion": 1,
+      "position": [
+        600,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "sendMessage",
+        "conversationId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": ""
+        },
+        "body": "=Invoice filed: {{ $json.name }} ({{ $(\"One item per PDF\").item.json.from }} – {{ $(\"One item per PDF\").item.json.subject }})"
+      },
+      "name": "Tell accounting",
+      "type": "@weslink/n8n-nodes-kibi-connect.kibiConnect",
+      "typeVersion": 1,
+      "position": [
+        900,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Invoice mailbox (IMAP)": {
+      "main": [
+        [
+          {
+            "node": "One item per PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One item per PDF": {
+      "main": [
+        [
+          {
+            "node": "File in the DMS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "File in the DMS": {
+      "main": [
+        [
+          {
+            "node": "Tell accounting",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
