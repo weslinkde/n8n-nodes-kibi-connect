@@ -3,12 +3,11 @@
   "info": {
     "title": "Kibi Connect - API Docs",
     "version": "1.0.0",
-    "description": "RESTful API for Kibi Connect. Enables external applications and services to interact with your workspace data using bearer token authentication.\n\n## Syncing with an external system — quick reference\n\nIf the master data lives outside Kibi — files in OneDrive or SharePoint, Markdown in a Git repository, issues in a forge — you do not have to keep a table of Kibi ULIDs on your side. Wiki pages, tasks, posts, calendar events and groups can each carry an **external id** per integration, and you address them by that id — both when writing and when reading back.\n\nThis section is the summary. The full walkthrough — minting the token, the first import, both sync directions, deletes, loop protection and the list of things that catch people out — follows further down under *Syncing an external system with Kibi*, together with the content-format reference.\n\n### The slug, in short\n\nThe namespace comes from the **API token**, never from the payload. It is chosen when the token is minted, under **My profile > Integrations**, it can only be set by a **system administrator**, and it **cannot be changed afterwards** — a different slug means a different token. Format: `^[a-z0-9]+(-[a-z0-9]+)*$`, up to 64 characters.\n\nA token without a slug gets **422** from every endpoint below, and reads `external_ref: null` everywhere rather than another integration's mapping.\n\nHolding the slug is a permission, not a label: a token carrying it may work on every mapping of that integration in the tenant. That is why the field is restricted to system administrators.\n\n### Endpoints\n\n| Resource | Write through | Read back by your id | Delete |\n|---|---|---|---|\n| Wiki page | `PUT /api/v1/wiki/by-external-id` | `GET /api/v1/wiki?external_id=…` | `DELETE /api/v1/wiki/{ulid}` → 204 |\n| Task | `PUT /api/v1/tasks/by-external-id` | `GET /api/v1/tasks?external_id=…` | `DELETE /api/v1/tasks/{ulid}` → 204 |\n| Post | `PUT /api/v1/posts/by-external-id` | `GET /api/v1/posts?external_id=…` | `DELETE /api/v1/posts/{ulid}` → **200 with body** |\n| Calendar event | `PUT /api/v1/calendar/events/by-external-id` | `GET /api/v1/calendar/events?external_id=…` | `DELETE /api/v1/calendar/events/{ulid}` → **200 with body** |\n| Group | `POST /api/v1/groups` (create + map), `PUT \\| DELETE /api/v1/groups/{group}/external-ref` | `GET /api/v1/groups?external_id=…` | create and map only — an existing group is never changed |\n\nEvery resource above exposes `external_ref` (`integration`, `external_id`, `content_hash`, `last_synced_at`) or `null`.\n\nThe upsert answers **201** when it created a resource and **200** when it updated the already mapped one.\n\nGroups work differently, and on purpose. `POST /api/v1/groups` **creates** a group — with an optional `external_id`, so an ERP project number becomes a group and its mapping in one call — but nothing in v1 ever **changes** an existing group: no rename, no type or visibility switch, no membership, no delete. That is why there is no `PUT /api/v1/groups/by-external-id`, and why calling `POST /api/v1/groups` twice creates twice. The `type_slug` field takes a locale-independent slug, and the set is tenant-specific: ask `GET /api/v1/groups/types` for the slugs this tenant accepts (`groups:read` is enough) instead of guessing them. Do not confuse it with the response's `type`, which is the translated label and cannot be sent back.\n\n### Reading a resource back by your own id\n\nThere is no separate `by-external-id` **GET**: the read path is the `?external_id=` filter on the index endpoints above, and it answers with a **collection**, not with a single object. Since `integration + external_id` is unique per tenant, `data` holds exactly one entry or none — read `data[0]`, and treat `\"data\": []` as \"nothing is mapped to this id yet, go ahead and create it\". That is the normal answer, not an error; there is no 404 on this path. A token without an integration slug gets **422**.\n\nCareful with the encoding here: the id sits in the **query string**, not in the body, so slashes, spaces and umlauts have to be percent-encoded — `ordner/Ünterlagen 2026.docx` is requested as `?external_id=ordner%2F%C3%9Cnterlagen%202026.docx`.\n\nAn empty answer is no proof that the id is free. The index hides soft-deleted resources, archived tasks and everything outside the token account's group visibility, so an id can be taken by something you cannot see — that is the **409** on the upsert. Only the upsert answers the question reliably.\n\n### Which id to pick\n\n`external_id` is a **required field in the request body** — the same place the group endpoint takes it — not a path segment. Kibi never interprets it, so anything your source system uses is fine: a SharePoint item id (`01ABCDEF2GHIJK3LMNOP`), a Jira key (`PROJ-4711`), a numeric primary key (`12345t62124`), a file path (`docs/guides/setup.md`). Because it sits in the body, slashes, spaces and umlauts need no URL encoding — `ordner/Ünterlagen 2026.docx` goes over the wire as it is.\n\nThe one rule: **pick an id that does not change when the object is renamed or moved.** A path is the tempting choice and the wrong one — move the file one folder up and the next sync no longer recognises what it wrote last week, so it creates a second resource and the first goes stale. Where the source system has an opaque id (SharePoint, Jira, most databases), use that and keep the path in the title or the content.\n\n### What you have to know before you build this\n\n- **Results are filtered by what the token's account can see.** Wiki pages, tasks and posts bound to a group are invisible to a token whose owner is not a member — and they are missing *silently*. No role lifts this. For a complete sync, put that account into every relevant group.\n- **409 means the external id is taken** — tenant-wide, across entity types, possibly by something the token cannot see. A retry never helps; a different id does.\n- **A soft-deleted resource keeps its mapping for 30 days.** Writing to the same external id within that window **restores** the resource with its history and comments (**200**). After the daily garbage collection force-deletes it, the same request creates a new one (**201**). Restoring tasks needs `tasks.update.any`; for wiki pages and posts, update permission is enough.\n- **`notify: false`** on the upsert suppresses the announcement to all users. It matters for **posts** (on create and on update); wiki pages and tasks send no announcement anyway, so the flag is accepted there but does nothing. It never silences `@mention` notifications or webhooks.\n- **Conflict detection is opt-in.** Send `If-Unmodified-Since` with the `Last-Modified` value from your last single-resource read or write and a write that would overwrite a meanwhile-changed resource is refused with **412**. Listings carry no such header — take `updated_at` from the entry there. Without the header the write is unconditional. Sending the header to an endpoint that does not evaluate it answers **400** rather than ignoring it silently. An HTTP date is second-precise, so a change within the same second as your read is not caught.\n- **Break the sync loop with `origin`.** Every webhook payload carries `origin: {source, integration}`; skip any delivery whose `integration` is your own slug. It is the only guard that also works for deletes. See the webhook documentation for the event reference and signature verification.\n- **Rate limits:** 30 writes per minute and 500 per hour; 120 reads per minute and 5000 per hour. Plan a bulk import around the hourly write budget.\n\n`content_format` lets you send and read HTML or Markdown instead of the TipTap JSON described below — see the parameter documentation on each endpoint.\n\n## Rich Text Content Format (TipTap JSON)\n\nThe `body` (posts) and `content` (wiki) fields use **TipTap JSON** — a structured document format.\nYou can also send a plain text string, which will be auto-wrapped in a basic paragraph.\n\n### Document Structure\n\nEvery document is a `{\"type\": \"doc\", \"content\": [...]}` object containing an array of block nodes.\n\n### Block Nodes\n\n| Type | Description | Key Attributes |\n|------|------------|----------------|\n| `paragraph` | Text paragraph | `textAlign` |\n| `heading` | Section heading | `level` (1-3) |\n| `bulletList` | Unordered list (contains `listItem` nodes) | — |\n| `orderedList` | Ordered list (contains `listItem` nodes) | — |\n| `blockquote` | Quoted text block | — |\n| `codeBlock` | Code snippet | `language` |\n| `table` | Table with `tableRow`, `tableHeader`, `tableCell` | `colspan`, `rowspan` |\n| `callout` | Info/warning/danger box | `type` (`info`, `warning`, `danger`) |\n| `details` | Collapsible section (`detailsSummary` + `detailsContent`) | — |\n| `stepList` | Numbered step-by-step guide (contains `stepItem` nodes) | — |\n| `gridBuilder` | Multi-column layout (contains `gridBuilderColumn` nodes) | `data-cols`, `data-stack-at` |\n| `seeAlso` | Related page links | `pages` (array of `{ulid, title}`) |\n| `imageResize` | Image with sizing | `src`, `alt`, `containerStyle` |\n\n### Inline Marks\n\nText nodes support `marks` for formatting:\n\n| Mark | Example |\n|------|---------|\n| `bold` | `{\"type\": \"text\", \"marks\": [{\"type\": \"bold\"}], \"text\": \"important\"}` |\n| `italic` | `{\"type\": \"text\", \"marks\": [{\"type\": \"italic\"}], \"text\": \"note\"}` |\n| `code` | `{\"type\": \"text\", \"marks\": [{\"type\": \"code\"}], \"text\": \"config\"}` |\n| `link` | `{\"type\": \"text\", \"marks\": [{\"type\": \"link\", \"attrs\": {\"href\": \"https://...\"}}], \"text\": \"click\"}` |\n\n### Minimal Example\n\n```json\n{\n  \"type\": \"doc\",\n  \"content\": [\n    {\"type\": \"heading\", \"attrs\": {\"level\": 1}, \"content\": [{\"type\": \"text\", \"text\": \"Title\"}]},\n    {\"type\": \"paragraph\", \"content\": [\n      {\"type\": \"text\", \"text\": \"Hello \"},\n      {\"type\": \"text\", \"marks\": [{\"type\": \"bold\"}], \"text\": \"world\"}\n    ]},\n    {\"type\": \"callout\", \"attrs\": {\"type\": \"info\"}, \"content\": [\n      {\"type\": \"paragraph\", \"content\": [{\"type\": \"text\", \"text\": \"This is a note.\"}]}\n    ]}\n  ]\n}\n```\n\n## Syncing an external system with Kibi (REST API v1)\n\nThis guide is for the case where the master data does **not** live in Kibi: pages\nin OneDrive or SharePoint, Markdown files in a Git repository, issues in a\nforge. Kibi is the frontend your people use; the other system stays the source\nof truth, or both sides write and the two have to be reconciled.\n\nThe mechanism is a **mapping**: every wiki page, task, post, calendar event and\ngroup can carry one identifier per integration — the path of the file, the item\nid, the issue number. You write against that identifier and never have to keep a\ntable of Kibi ULIDs on your side.\n\nEverything below is REST API v1 (`/api/v1`), bearer-token authenticated. The\ninteractive endpoint reference lives at `/docs/api` on your tenant.\n\n---\n\n### 1. The two things you need to understand first\n\n#### The mapping\n\nOne row per (resource, integration) in `external_references`. Two uniqueness\nrules apply, and both will bite you at some point:\n\n- **`(integration, external_id)`** — an external id is used **once per\n  integration, across the whole tenant and across all entity types**. The same\n  `docs/setup.md` cannot be a wiki page and a task at the same time.\n- **`(resource, integration)`** — a resource carries at most one id per\n  integration. Writing a second one replaces the first.\n\nDifferent integrations are independent: a page can be `docs/setup.md` for\n`github` and `01ABC…` for `sharepoint` at the same time.\n\n#### The integration slug\n\nThe slug is **not** part of any payload. It is read from the API token\n(`App\\Support\\Api\\IntegrationContext`). That is the whole isolation model: a\ntoken *is* an integration, and it can only ever see and write its own mappings.\n\n- Chosen **when the token is minted**, under **My profile > Integrations**.\n- Only a **system administrator** can set it — the field is not even offered to\n  anyone else, and sending it anyway is rejected.\n- **Immutable.** There is no update endpoint for a token. A different slug means\n  a different token.\n- Format: `^[a-z0-9]+(-[a-z0-9]+)*$`, at most 64 characters — `github`,\n  `ms-entra`, `sharepoint-docs`.\n- A token **without** a slug gets **422** from every endpoint that needs one, and\n  reads back `external_ref: null` everywhere rather than someone else's mapping.\n\n> **The slug is a permission, not a label.** Whoever holds a token with the slug\n> `github` may work on every `github` mapping in the tenant — including\n> `DELETE /groups/{group}/external-ref` on a group they are not allowed to see.\n> That exemption is deliberate (see [section 8](#8-deleting)), and it is why the\n> field is restricted to system administrators.\n\n---\n\n### 2. What can be mapped\n\n| Resource | Read the mapping | Filter | Write through | Delete |\n|---|---|---|---|---|\n| Wiki page | `external_ref` on `GET /wiki`, `GET /wiki/{ulid}` | `?external_id=` | `PUT /wiki/by-external-id` | `DELETE /wiki/{ulid}` → 204 |\n| Task | `external_ref` on `GET /tasks`, `GET /tasks/{ulid}` | `?external_id=` | `PUT /tasks/by-external-id` | `DELETE /tasks/{ulid}` → 204 |\n| Post | `external_ref` on `GET /posts`, `GET /posts/{ulid}` | `?external_id=` | `PUT /posts/by-external-id` | `DELETE /posts/{ulid}` → **200 with body** |\n| Calendar event | `external_ref` on `GET /calendar/events`, `GET /calendar/events/{ulid}` | `?external_id=` | `PUT /calendar/events/by-external-id` | `DELETE /calendar/events/{ulid}` → **200 with body** |\n| Group | `external_ref` on `GET /groups`, `GET /groups/{ulid}` | `?external_id=` | `POST /groups` (create + map), `PUT /groups/{group}/external-ref` (map an existing one) | `DELETE /groups/{group}/external-ref` → 204 |\n| Webhook endpoint | `external_ref` on `GET /webhook-endpoints` | `?external_id=` | `POST /webhook-endpoints` (create + map) | `DELETE /webhook-endpoints/{webhookEndpoint}` → 204 |\n\n`external_ref` is `null` when the resource carries no mapping for **your**\nintegration, and otherwise:\n\n```json\n\"external_ref\": {\n  \"integration\": \"github\",\n  \"external_id\": \"docs/guides/setup.md\",\n  \"content_hash\": \"9f2b…\",\n  \"last_synced_at\": \"2026-09-01T09:14:22+02:00\"\n}\n```\n\n**Groups are still the odd one out, but less than they were.** A sync can\n**create** a group — `POST /groups`, see [section 4a](#4a-creating-a-group) — and\nit can map an existing one. What it cannot do is **change** one: renaming,\nswitching the type or the visibility, archiving, deleting and membership all\nstay in Kibi. Those are the levers that decide who sees what, and they are not\nsomething a sync token should be able to move. There is consequently no\n`PUT /groups/by-external-id`: `POST /groups` creates, and calling it twice\ncreates twice (or answers 409, if you sent the same external id both times).\n`PUT /groups/{group}/external-ref` writes the mapping row and nothing else; the\ngroup object is not touched.\n\n**Calendar events differ in two ways** from wiki pages, tasks and posts, both\ncovered below: the schedule (`name`, `day`, and `start_time` or `full_day`) is\nrequired on **every** upsert including updates ([section 4](#4-step-2--the-first-import)),\nand a deleted event never comes back — it has no bin, so its mapping goes with\nit and the external id is released immediately ([section 8](#8-step-6--deleting)).\n\n> **Send a `type`, or nobody will see the events.** An event without one is\n> created as `personal`, which is visible to its creator and to invited\n> participants only — so a mirrored team calendar lands in the token owner's\n> account and nowhere else. Send `type: \"general\"` for something everyone\n> should see, or `type: \"group\"` together with `group_id`. The same rule holds\n> for updates: only the account that **created** an event may write it, so a\n> sync can update the events it imported itself but never one a person made in\n> Kibi.\n\n**Webhook endpoints are the odd one out in two ways.** The mapping is\n**required** on create, not optional — an endpoint nobody owns could not be\nfound or removed through the API afterwards, and it would keep delivering.\nAnd there is no `DELETE /webhook-endpoints/{id}/external-ref`: releasing the\nmapping while keeping the endpoint is exactly the state that route would\ncreate, so it does not exist. The mapping dies with the endpoint. See\n[webhooks.md](webhooks.md#3a-creating-an-endpoint-through-the-api) for the\nfull create/update/delete lifecycle.\n\n#### Choosing an external id\n\n`external_id` is a **required field in the request body** on all five write\nendpoints — the same place the group endpoint has always taken it, never a path\nsegment. That is the whole reason it moved: an id in the body needs no URL\nencoding, so slashes, spaces and umlauts survive untouched.\n`ordner/Ünterlagen 2026.docx` goes over the wire exactly as written.\n\nKibi never interprets the value, so anything the source system uses is a valid\nid:\n\n| Source system | A good `external_id` |\n|---|---|\n| SharePoint / OneDrive (Graph) | the item id — `01ABCDEF2GHIJK3LMNOP` |\n| Jira | the issue key — `PROJ-4711` |\n| A database of your own | the primary key — `12345t62124` |\n| A Git repository | the file path — `docs/guides/setup.md` |\n| A forge's issues | `repo/issues/42` |\n\n**The one rule: pick an id that does not change when the object is renamed or\nmoved.** This is where syncs actually go wrong. A path is the tempting choice\nand usually the wrong one — move the file one folder up and the next run no\nlonger recognises the page it wrote last week: it creates a second one, and the\nfirst goes stale with nothing pointing at it. Where the source system has an\nopaque id (SharePoint, Jira, most databases), address the object by that id and\ncarry the path in the title or the content, where it is allowed to change.\n\nA Git repository is the honest exception: the path *is* the identity there, and\nthere is nothing more stable to use. Accept that a `git mv` shows up in Kibi as\na new page plus an orphan, and delete the orphan on your side.\n\n---\n\n### 3. Step 1 — mint the token\n\nA system administrator opens **My profile > Integrations > Create token** and\nsets:\n\n- **Name** — free text, for humans.\n- **Scopes** — `wiki:read`, `wiki:write`, `tasks:read`, `tasks:write`,\n  `posts:read`, `posts:write`, `calendar:read`, `calendar:write`, `groups:read`,\n  `groups:write`. Take only what the sync needs.\n- **Integration slug** — `github`, `sharepoint`, whatever names your side.\n\nThe plaintext token is shown **once**. There is no way to retrieve it later and\nno way to change the slug afterwards.\n\n```bash\nexport TOKEN='kibi_…'\nexport BASE='https://acme.kibi.de/api/v1'\ncurl -s -H \"Authorization: Bearer $TOKEN\" \"$BASE/wiki?limit=1\"\n```\n\n#### The account behind the token matters more than you think\n\nA token belongs to the account that minted it, and **every request is filtered\nby what that account can see.** Wiki pages, tasks and posts bound to a group are\ninvisible to a token whose owner is not in that group — and they are invisible\n**silently**: the list is simply shorter. Nothing in the response says\n\"3 records were filtered out\". From the outside that looks exactly like data\nloss on the Kibi side.\n\nThis is not a role question. Holding SYSTEM_ADMIN does not lift the filter; the\nvisibility scope runs on the query regardless of role. **If the sync is meant to\ncover everything, put the token's account into every relevant group** — and\nre-check that after someone creates a new private group.\n\n---\n\n### 4. Step 2 — the first import\n\nWrite each source object to its external id. `PUT` is the only verb you need:\n**201** when nothing was mapped to that id yet, **200** when the mapped resource\nwas updated.\n\n```bash\ncurl -s -X PUT \"$BASE/wiki/by-external-id\" \\\n  -H \"Authorization: Bearer $TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n        \"external_id\": \"01ABCDEF2GHIJK3LMNOP\",\n        \"title\": \"Setup\",\n        \"content\": \"## Setup\\n\\nRead this first.\",\n        \"content_format\": \"markdown\",\n        \"notify\": false\n      }'\n```\n\nFour things about the payload:\n\n- **`external_id` is a required body field**, not a path segment — see\n  [Choosing an external id](#choosing-an-external-id) for what to put in it.\n- **Omitted fields stay untouched.** Leaving out `content` keeps the stored\n  content; sending an empty string does the same. There is no way to clear a\n  field by omission. The one exception is the calendar event's schedule: `name`,\n  `day` and either `start_time` or `full_day: true` are required on every call,\n  update included. An event *is* its point in time, and the create branch has no\n  earlier state to fall back on.\n- **`content_format`** picks the wire format — `json` (TipTap, the default for\n  wiki and posts), `html` or `markdown`. Tasks default to `html`. Calendar\n  events take **no** `content_format` at all: their `description` is plain text\n  on the way in and the stored HTML on the way out, as it has been since v1\n  shipped. Read\n  [content-formats.md](content-formats.md) before you choose; the short version\n  is that **HTML is not fully lossless** (a handful of node types — mentions,\n  the \"see also\" widget, emoticon/voice/hurdle nodes — flatten on the way\n  through) and **Markdown loses considerably more**\n  (everything Markdown has no syntax for: tables, callouts, step lists, grids).\n  Use HTML if your system speaks it, Markdown only when the other side owns the\n  content anyway, JSON when Kibi is the source of truth.\n- **`notify: false`** on a bulk import. See below.\n\n#### `notify`\n\nDefaults to `true`. It exists for the first import, where a few hundred\nresources arriving at once should not announce themselves to the whole\nworkforce.\n\nWhere it actually does something today:\n\n| Endpoint | Effect of `notify: false` |\n|---|---|\n| `PUT /posts/by-external-id` | **Real.** Suppresses the announcement to all users — on create *and* on update, including the update that follows a restore. |\n| `PUT /wiki/by-external-id` | None. Wiki pages send no announcement on creation. |\n| `PUT /tasks/by-external-id` | None. Tasks created here send no announcement. |\n| `PUT /calendar/events/by-external-id` | None. The endpoint assigns neither participants nor external guests, so nobody is invited and nobody is notified. |\n\nIt is accepted on all four so the payload is the same shape everywhere; on wiki,\ntasks and calendar events it is a no-op you can leave in.\n\nWhat `notify: false` does **not** silence, even on posts: people named with an\n`@mention` in the body still get their notification (that message is addressed to\na person, not to the workforce), and webhook subscribers still receive\n`post.created` / `post.updated`.\n\n#### Budget the import against the rate limit\n\n| | Per minute | Per hour |\n|---|---|---|\n| Reads, any token | 120 | 5000 |\n| Writes, **token with an integration slug** | 120 | 3000 |\n| Writes, personal token (no slug) | 30 | 500 |\n\nA token that carries an integration slug gets the larger write budget because it\nis a machine, and because only a system administrator can issue one. An import\nof 2000 objects runs in about 17 minutes on it. On a personal token the same\nimport takes at least four hours.\n\nExpect `429` with a `Retry-After` when you exceed either limit. The minute limit\nis there to absorb a burst — a batch your side flushes at once; the hour limit is\nwhat bounds a sync that has gone into a loop.\n\nThe counter is keyed by the **token**, so two integrations calling from the same\negress address get a bucket each and neither can lock the other out. Requests\nthat arrive without a valid token — a wrong or revoked one included — fall back\nto a per-IP bucket, which is what keeps guessing at tokens capped.\n\n> Two things changed on 2026-09-01, both of which make the numbers above\n> larger than what you actually got before:\n>\n> - The counter used to be keyed by IP for everyone — the limiter ran before the\n>   token was resolved, so the fallback applied to every request.\n> - Every `/api/v1` request also passed a second, older limiter of **60 per\n>   minute per IP**, which was the smaller and therefore the effective number.\n>   The 120 reads per minute documented here were never reachable. That limiter\n>   no longer applies to v1.\n>\n> If you paced an import around either, you can go faster now.\n\n#### Groups have a second budget, and it is not the rate limit\n\n`POST /groups` ([section 4a](#4a-creating-a-group)) is the one write in this API\nwhere the rate limit is not the binding constraint. Every group creation\ninvalidates the tenant's cache — and not just the group's own entries: the cache\nis tag-based, and flushing one tag flushes the tenant's whole cache with it.\nCreating a group therefore empties the cache for **everyone working in that\ntenant at that moment**, and every page they open afterwards rebuilds from the\ndatabase.\n\nOne group is nothing. Three hundred groups fired back to back inside the 3000/h\nwrite budget is a tenant that spends the whole import with a cold cache, which\npeople notice as a platform that has become slow for no visible reason.\n\n**So pace group creation deliberately, not against the rate limit.** Spread it\nover the run — a short pause between groups, or a batch per interval — and\nwhere you can, put it outside working hours. This is the one endpoint where\nstaying under the limit is not enough.\n\nNone of the other write endpoints behave this way; for wiki pages, tasks, posts\nand calendar events the rate limit really is the only ceiling.\n\n---\n\n### 4a. Creating a group\n\nGroups are the one entity a sync can bring into existence but never change. The\ncase this is built for: a project number in the ERP should become a group in\nKibi, and the project number is the external id.\n\n```bash\ncurl -s -X POST -H \"Authorization: Bearer $TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n        \"name\": \"Neubau Halle 4\",\n        \"type_slug\": \"project\",\n        \"description\": \"Projektgruppe zur Baustelle in Rheine.\",\n        \"external_id\": \"P-2026-0815\"\n      }' \\\n  \"$BASE/groups\"\n```\n\n**201** with the group, `external_ref` included. Fields:\n\n| Field | | |\n|---|---|---|\n| `name` | required | |\n| `type_slug` | optional | a **slug**, see below. Defaults to `miscellaneous`. |\n| `description` | optional | plain text, or a TipTap document |\n| `visibility` | optional | `all` (default) or `members` |\n| `external_id` | optional | your own id; creates the mapping in the same call |\n\nEverything else a group can have — cover image, location, templates, the tool\nlist, membership — is deliberately not here. A sync does not need it, and each\nof those would be a second way to configure a group next to Kibi itself.\n\nThe ERP project number is a textbook `external_id` by the rule in\n[Choosing an external id](#choosing-an-external-id): it is assigned once and\nsurvives every rename of the project. Renaming the group in Kibi does not touch\nit either, so the mapping holds in both directions.\n\nAlso see the pacing note in\n[section 4](#groups-have-a-second-budget-and-it-is-not-the-rate-limit) before\nyou import a few hundred of these — group creation is the one write in this API\nwhere the rate limit is not the binding constraint.\n\n#### Ask for the types, do not guess them\n\n`type_slug` takes a locale-independent **slug**, and the set is not fixed: next to\nthe six standard types every tenant has, a tenant can define its own. There is\nno way to guess those, which is what `GET /groups/types` is for:\n\n```bash\ncurl -s -H \"Authorization: Bearer $TOKEN\" \"$BASE/groups/types\"\n```\n\n```json\n{\n  \"data\": [\n    { \"value\": \"department\", \"label\": \"Abteilung\", \"standard\": true },\n    { \"value\": \"project\",    \"label\": \"Projekt\",   \"standard\": true },\n    { \"value\": \"baustelle\",  \"label\": \"Baustelle\", \"standard\": false }\n  ]\n}\n```\n\n`standard: false` marks a type this tenant added for itself. Every `value` in\nthe list is accepted by `type_slug`; anything else is a **422**. The endpoint needs\n`groups:read` only.\n\nTwo of the standard types are HR-managed — `department` and `location`. They are\nlisted for everyone, but creating a group with one of them needs a token whose\naccount may manage them, and otherwise answers 422. A mirror of an ERP wants\n`project` anyway. The same applies to `visibility: \"members\"`: introducing it\ntakes a token that may manage groups.\n\nAPI v1 cannot create a *type*. A slug that is missing from the list has to be\nadded once by a system administrator in Kibi before the sync can use it.\n\n> **`type_slug` on both sides; `type` is display only.** The field you send is\n> `type_slug`, and the slug you sent comes back under the same name. `type` in\n> the response is the label a person sees, translated into the tenant's\n> language — `\"Projekt\"`, not `\"project\"` — so it cannot be sent back.\n>\n> `POST /groups` does still accept the slug under `type`, the name the endpoint\n> first shipped with. It is deprecated, it means exactly `type_slug`, and\n> `type_slug` wins when both are sent. Do not build on it.\n\n#### It is a create, not an upsert\n\nCalling it twice creates two groups. There is no `PUT /groups/by-external-id`,\nbecause that endpoint would have to *update* a group on the second call, and\nupdating groups is exactly what stays out of v1. If your sync may run against\ngroups it wrote earlier, ask first:\n\n```bash\ncurl -s -H \"Authorization: Bearer $TOKEN\" \"$BASE/groups?external_id=P-2026-0815\"\n```\n\nAn empty `data` means nothing is mapped to that id — but see\n[section 5](#an-empty-answer-is-not-proof-the-id-is-free): the honest answer\ncomes from the **409**. If you send an `external_id` that is already taken, no\ngroup is created at all; the group row and its mapping are written in one\ntransaction, so a lost race leaves nothing behind.\n\n`external_id` is optional here — leave it out and you get a group with no\nmapping, which is also the only case where the endpoint works on a token\n**without** an integration slug. With an id and without a slug the answer is\n**422**, and no group is created.\n\n#### What creating a group sets off\n\nMore than a row in a table, and a bulk import should know it:\n\n- **The token's own account joins the group as administrator.** Not a side\n  effect to work around — it is what keeps the group visible to the sync\n  afterwards, since every read is filtered by what that account can see\n  ([section 3](#the-account-behind-the-token-matters-more-than-you-think)). It\n  is also the answer to the visibility problem that section raises: for groups\n  the sync created itself, you never have to remember to add the account\n  anywhere.\n\n  The flip side is worth stating plainly: **the account accumulates one such\n  membership per created group.** After 300 project groups it administers 300\n  groups, it appears in each of their member lists, and it receives whatever a\n  group administrator receives. That is correct behaviour, not a leak — but if\n  you were expecting a machine account that stays out of everybody's way, this\n  is where it does not.\n- A **group chat** and a **file folder** are created for the group.\n- If the tenant switched on *notify administrators about new groups*, every\n  system administrator is notified — **once per group**. There is no flag on the\n  endpoint to suppress this (unlike `notify` on the post upsert): it is a tenant\n  setting, and it is off unless somebody turned it on. Check it before importing\n  a few hundred groups — that is a few hundred notifications per administrator.\n- **Every creation flushes the tenant's cache.** This is the constraint that\n  actually bites on a bulk import, and it has its own note in\n  [section 4](#groups-have-a-second-budget-and-it-is-not-the-rate-limit): staying\n  under the rate limit is not enough, spread the creates out.\n\n---\n\n### 5. Step 3 — reading back\n\nThis is the read counterpart to the upsert: *give me the resource I know under\nmy own id*. There is no separate endpoint for it — the index endpoints take\n`?external_id=` as a filter:\n\n```bash\ncurl -s -H \"Authorization: Bearer $TOKEN\" \\\n  \"$BASE/wiki?external_id=01ABCDEF2GHIJK3LMNOP\"\n```\n\nThe filter applies to all five index endpoints and **requires a token with a\nslug** — without one it is 422, not an empty result.\n\nReading back by your own id is the lookup. For the sweep — *everything that\nchanged since T* — see `updated_since` below.\n\n#### It answers with a collection, not with one object\n\n`integration + external_id` is unique across the tenant, so the list holds at\nmost one entry — but it is still a list, and your code has to read `data[0]`:\n\n```json\n{ \"data\": [ { \"id\": \"01j8x…\", \"title\": \"Setup\", \"external_ref\": { … } } ] }\n```\n\nNothing mapped to that id looks like this — **not** a 404:\n\n```json\n{ \"data\": [] }\n```\n\nAn empty `data` is the normal, expected answer for \"I have not written this\nobject to Kibi yet\", and the right reaction is to create it with the upsert.\nDo not treat it as an error.\n\n#### The id goes in the query string, so encode it\n\nThis is the one place where the encoding problem the upsert no longer has still\napplies. A query parameter carrying slashes, spaces or umlauts has to be\npercent-encoded:\n\n```bash\n# external_id = ordner/Ünterlagen 2026.docx\ncurl -s -H \"Authorization: Bearer $TOKEN\" \\\n  \"$BASE/wiki?external_id=ordner%2F%C3%9Cnterlagen%202026.docx\"\n```\n\nMost HTTP clients do this for you if you pass the value as a query parameter\nrather than pasting it into the URL string — use that path and the question does\nnot come up.\n\n#### `updated_since` — the catch-up scan\n\nThe other way to read back: *what changed since I last looked?* Every index\nendpoint takes `?updated_since=` with an ISO 8601 moment, and answers with the\nrecords whose `updated_at` is at or after it.\n\n```bash\ncurl -s -H \"Authorization: Bearer $TOKEN\" \\\n  \"$BASE/wiki?updated_since=2026-09-01T00:00:00%2B00:00&sort=updated_at&limit=50\"\n```\n\nThis is the filter you need when webhooks were down and a full re-scan is the\nonly way back. It is deliberately about the **change** date, not the creation\ndate: a page written last year and edited this morning comes back, which is\nexactly the record a creation-date filter would miss and exactly the one your\nsync is missing.\n\nThe comparison is **inclusive**, and the stored timestamps are second-precision.\nThe record sitting exactly on your watermark therefore arrives once more on the\nnext run. That is at-least-once, on purpose — the alternative would drop every\nchange that happened in the same second as your watermark. Writing it through\nthe upsert again costs nothing.\n\n#### `sort=updated_at` — walk the pages and move the watermark\n\nEvery index endpoint keeps the order it always had: `created_at` descending for\nwiki pages and tasks, `published_at` descending for posts, `name` for groups,\n`day` + `start_time` for calendar events. `?sort=updated_at` switches to\n**least recently changed first** — ascending, the other way round from every\ndefault here.\n\nThat direction is the point. A catch-up scan works the oldest changes first, so\nafter each page it can move its watermark to the last `updated_at` it saw and\nresume there if it dies halfway. Descending, it would have to finish every page\nbefore it could record anything.\n\nBoth orders now break ties on the record id. Without that, two records carrying\nthe same second — the normal case after a bulk import — could swap places\nbetween two queries, so page 1 returned a record and page 2 returned it again\nwhile another was never shown at all. Postgres makes no promise about the order\nof equal rows, and the scan silently lost data.\n\nAn unknown `sort` value is a **422**, not a silent fallback: a caller who\nbelieved they had re-sorted would advance a watermark against the wrong order.\n\nThe response shape is unchanged — `data`, `links`, `meta` with `total` and\n`last_page`, the same offset pagination as before.\n\n#### An empty answer is not proof the id is free\n\n**The index is not an existence check.** It never returns soft-deleted\nresources, `GET /tasks` additionally excludes archived tasks, and everything\noutside the token account's group visibility is missing silently. An external id\ncan be taken by something the list does not show you — which is exactly the 409\ndescribed in [section 6](#6-step-4--the-ongoing-inbound-sync-external--kibi).\nThe upsert is the only reliable answer to \"is this id taken?\"; it looks through\nsoft-deletes on purpose.\n\n---\n\n### 6. Step 4 — the ongoing inbound sync (external → Kibi)\n\nExactly the same `PUT` as the import, without `notify: false`. Nothing else\nchanges: 201 for new, 200 for existing, omitted fields untouched.\n\n#### 409 — the external id is taken\n\n**A retry never helps.** 409 means `(your slug, that external id)` is already\nmapped, to something you cannot see or to a different entity type. The resource\nbehind it is neither revealed nor modified — visibility wins over uniqueness.\n\nYour options are: pick a different external id, or — if the mapping in the way\nis one your own integration holds — release it first:\n\n| Entity | Unlink |\n|---|---|\n| Wiki page | `DELETE /api/v1/wiki/{ulid}/external-ref` |\n| Task | `DELETE /api/v1/tasks/{ulid}/external-ref` |\n| Post | `DELETE /api/v1/posts/{ulid}/external-ref` |\n| Group | `DELETE /api/v1/groups/{group}/external-ref` |\n| Calendar event | none needed — see below |\n\nCalendar events need no unlink endpoint: they have no bin, so deleting one\nreleases its external id at once.\n\nSee *Releasing a mapping* below for what these endpoints do and do not touch.\n\n#### 412 — someone edited it in Kibi meanwhile\n\nWiki pages are edited collaboratively in the browser. A page can be open in\nsomebody's editor while your sync writes over it. To prevent that:\n\n1. Take the `Last-Modified` value from your last single-resource read\n   (`GET /wiki/{ulid}`, `/tasks/{ulid}`, `/posts/{ulid}`,\n   `/calendar/events/{ulid}`) or from your previous write to that resource. From\n   a listing, take the entry's `updated_at` and convert it to an HTTP date.\n2. Send it as `If-Unmodified-Since` on the next write.\n3. **412** means it changed in the meantime; nothing was written. Re-read, merge,\n   retry.\n\n```bash\ncurl -s -X PUT \"$BASE/wiki/by-external-id\" \\\n  -H \"Authorization: Bearer $TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -H 'If-Unmodified-Since: Wed, 21 Oct 2026 07:28:00 GMT' \\\n  -d '{\"external_id\": \"01ABCDEF2GHIJK3LMNOP\", \"title\": \"Setup\", \"content\": \"…\", \"content_format\": \"markdown\"}'\n```\n\nFour things worth knowing:\n\n- **Without the header, the write is unconditional.** That is the pre-existing\n  behaviour of API v1 and it is kept deliberately. Conflict detection is opt-in.\n- **Only some endpoints evaluate it** — the eight `by-external-id` and `{id}`\n  update routes for wiki, tasks, posts and calendar events. Sending the header\n  at any **other** write endpoint answers **400** and writes\n  nothing. That is on purpose: a silently ignored header would let you believe\n  you were protected when you were not.\n- **`Last-Modified` comes back on single-resource reads and on writes, not on\n  listings.** `GET /wiki/{ulid}` and its three siblings carry the header, as\n  does every write that evaluates the precondition. A listing — including the\n  `?external_id=` read-back — does not: a page of results has no single\n  timestamp, and the newest one on the page would be a licence to overwrite the\n  older entries. Use `updated_at` from the entry there.\n- **Second granularity.** An HTTP date has no sub-second precision, so an edit\n  that lands in the *same second* as your read slips through undetected. This is\n  inherent to the mechanism, not a bug that will be fixed.\n\nAn unparseable date is **400**, not a silent pass.\n\n---\n\n### 7. Step 5 — the ongoing outbound sync (Kibi → external)\n\nSubscribe to webhooks. The full guide — enabling the feature, creating the\nendpoint, verifying the HMAC signature, the retry policy and the complete event\nlist — is [webhooks.md](webhooks.md). The events relevant to a sync are\n`wiki_page.created/updated/deleted`, `task.created/updated/completed/assigned`\nand `post.created/updated/deleted`.\n\n#### Break the loop\n\nYour write into Kibi produces a webhook. If your receiver treats it as a change\nand writes back, the two systems ping-pong forever.\n\n**Every webhook payload carries `origin`:**\n\n```json\n\"origin\": { \"source\": \"api\", \"integration\": \"github\" }\n```\n\n`source` is `\"api\"` for a change that came in through API v1 with a token and\n`\"ui\"` for everything else (a person in Kibi, a job, a console command).\n`integration` is the slug of the token that made the write, or `null`.\n\nIgnore any delivery where `origin.integration` is your own slug:\n\n```js\nif (payload.data.origin?.integration === 'github') return res.status(200).send('own write');\n```\n\nThat is the reliable guard, and it is the **only** one that works for deletes —\na delete has no content to compare.\n\n`content_hash` on the mapping is a secondary signal: it holds the SHA-256 of the\ncontent Kibi stored at your last write through the API. If it is unchanged\nbetween two reads, nothing was written through your integration since. Note that\nrecomputing the hash on your side means reproducing Kibi's normalisation\n(recursive key sorting before serialisation) — do not build your loop protection\non that. Use `origin`.\n\nTwo more things about webhooks that matter for a sync, both detailed in\n[webhooks.md](webhooks.md): **order is not guaranteed** (reorder on\n`X-Kibi-Timestamp` if you depend on it), and a receiver that takes longer than\n10 seconds counts as a failed attempt.\n\n---\n\n### 8. Step 6 — deleting\n\n| Endpoint | Answer |\n|---|---|\n| `DELETE /api/v1/wiki/{ulid}` | **204**, no body |\n| `DELETE /api/v1/tasks/{ulid}` | **204**, no body |\n| `DELETE /api/v1/posts/{ulid}` | **200** with `{\"message\": \"Post deleted successfully.\"}` |\n| `DELETE /api/v1/calendar/events/{ulid}` | **200** with `{\"message\": \"Calendar event deleted successfully.\"}` |\n| `DELETE /api/v1/wiki/{ulid}/external-ref` | **204**, no body — mapping only |\n| `DELETE /api/v1/tasks/{ulid}/external-ref` | **204**, no body — mapping only |\n| `DELETE /api/v1/posts/{ulid}/external-ref` | **204**, no body — mapping only |\n| `DELETE /api/v1/groups/{group}/external-ref` | **204**, no body — mapping only |\n\nThe post and calendar endpoints are inconsistent with the other two and stay\nthat way: they predate them, and changing their status code would break every\nintegration already reading that body. Handle both.\n\nWiki, task and post deletes are **soft** deletes. A wiki page with subpages is\nrefused with **422** — move or delete the children first.\n\n#### The calendar event is the exception: it is deleted for good\n\nA calendar event has **no bin**. `DELETE /calendar/events/{ulid}` removes the\nrow, and the mapping goes with it — the external id is free again **at once**.\nWriting to that id afterwards creates a brand-new event and answers **201**, with\na new ULID and no history.\n\nEverything in the next section is therefore about wiki pages, tasks and posts\nonly. For calendar events there is no 30-day window and nothing to restore: a\ndelete is final, and re-importing the same source appointment produces a\ndifferent event.\n\n#### For the other three, the mapping survives a delete, for 30 days\n\nThis is the single most consequential detail on this page.\n\nA soft-deleted resource **keeps** its mapping. Writing to the same external id\nagain therefore does not create a duplicate — it **restores** the resource with\nits history and comments and updates it, answering **200**.\n\nA daily garbage collector force-deletes what has been in the bin for more than\n**30 days** — `kibi:garbage-collect-wiki-content`, `…-posts`, `…-tasks` and\n`…-groups`, one per mappable entity, all with the same window. A force-delete\ntakes the mapping with it and releases the external id.\n\nSo the same request has two different outcomes depending on when it arrives:\n\n| A source file comes back… | Result |\n|---|---|\n| within 30 days of the delete | **200** — the original page is restored, history and comments intact |\n| after 30 days | **201** — a brand-new page, no history, no comments, new ULID |\n\nRestoring is checked as a permission of its own, but on all three resource types\nit now asks the same question as `update`: whoever may update the resource may\nbring it back. A token that may write a resource can therefore always restore\nit.\n\n> Until 2026-09-01 tasks were the exception: restoring one required\n> `tasks.update.any`, a manager permission, so a token that could update its own\n> tasks got **403** on the restore and the restore path was unusable for a\n> normal integration.\n\n#### Releasing a mapping\n\nEvery mappable entity has an unlink endpoint, and they all behave the same way:\n\n```\nDELETE /api/v1/wiki/{ulid}/external-ref\nDELETE /api/v1/tasks/{ulid}/external-ref\nDELETE /api/v1/posts/{ulid}/external-ref\nDELETE /api/v1/groups/{group}/external-ref\n```\n\nAll answer **204** and remove **only** the mapping your token's integration\nholds. The resource is not touched — not deleted, not restored, not changed, not\neven its `updated_at`. A `sharepoint` mapping on the same resource survives a\ncall from a `github` token untouched.\n\n**This is the way out of an external id you picked wrong.** The classic case:\nyour integration keyed on file paths, found out — as this guide warns — that a\nrename breaks that, and now wants to move to stable item ids. Without an unlink\nthe old ids stay taken until the resource leaves the bin 30 days later, and every\nattempt to reuse one answers 409.\n\nThese endpoints also reach a resource that has become **invisible since you\nwrote the mapping** — soft-deleted, moved into a group you are not in, set back\nto draft, or switched to members-only — and they reach it for exactly one\nreason: to release the external id. The resource stays deleted, stays invisible,\nis not restored and is not revealed. Without that exemption its external id would\nstay blocked tenant-wide with no way out short of a database intervention.\n**Holding the mapping is the permission to release it** — your integration wrote\nthat row itself, and had to pass the visibility check to do so.\n\nThey are idempotent: a resource with no mapping for your integration also answers\n204. But if there was nothing to delete **and** you cannot see the resource, you\nget the same refusal its single read gives you — **404** for wiki pages, tasks\nand posts, **403** for groups. The idempotent 204 must not become an existence\noracle for resources you cannot see.\n\n---\n\n### 9. Status codes on the sync endpoints\n\n| Code | Meaning | Retry? |\n|---|---|---|\n| 200 | Existing resource updated (or restored and updated) | — |\n| 201 | New resource created | — |\n| 204 | Deleted / mapping removed | — |\n| 400 | `If-Unmodified-Since` sent to an endpoint that does not evaluate it, or an unparseable date | No — fix the request |\n| 403 | The token's account may not create/update/restore this resource. On calendar events this is the flat rule that only the creator may write one — so a sync can only update events its own token created. On webhook endpoints this also covers webhooks not being enabled for the tenant (`code: webhooks_disabled`) and an endpoint not mapped to the calling integration | No |\n| 404 | No resource with that ULID (or not visible to this token) | No |\n| 409 | The external id is already taken in this integration | **Never** — use a different id |\n| 412 | Changed since your `If-Unmodified-Since`; nothing written | Yes, after re-reading |\n| 422 | Token has no integration slug, unknown `content_format`, unknown or HR-managed group `type_slug`, wiki page has subpages, validation | No — fix the request or the token |\n| 429 | Rate limit; honour `Retry-After` | Yes, later |\n\n#### `code` — branch on this, not on the message\n\nThe status alone does not say enough. Five unrelated things answer **422**, and\nthey ask for five different reactions: a new token, a code change on your side, a\ncorrected request, a business decision, a fixed field. Telling them apart used to\nmean matching on an English sentence — and those sentences change whenever\nsomebody improves a wording.\n\nError responses therefore carry a `code` **next to** `message`:\n\n```json\n{\n  \"message\": \"This external id is already mapped to a resource you cannot see.\",\n  \"code\": \"external_id_taken\"\n}\n```\n\n`message` is unchanged, word for word. **Branch on `code`, log `message`.** A\ncode is never renamed; if a case is ever split more finely, a new code appears\nbeside it.\n\n| `code` | Status | What it means | What to do |\n|---|---|---|---|\n| `external_id_taken` | 409 | `(your slug, that external id)` is already mapped, possibly to something you cannot see or to another entity type | Use a different id, or release your own mapping with `DELETE /{entity}/{ulid}/external-ref` |\n| `integration_slug_missing` | 422 | The token carries no integration slug | Ask an administrator for a new token — the slug cannot be added later |\n| `invalid_external_id` | 422 | `?external_id=` did not arrive as a plain string (typically `?external_id[]=…`) | Fix the query string |\n| `unknown_content_format` | 422 | `format` / `content_format` is not one of `json`, `html`, `markdown` | Fix your client |\n| `has_subpages` | 422 | The wiki page still has children and was not deleted | Move or delete the children first |\n| `restore_forbidden` | 403 | The external id points at a deleted resource this account may not restore | Different account, or a different id |\n| `precondition_failed` | 412 | The resource changed after your `If-Unmodified-Since`; nothing was written | Re-read, merge, retry |\n| `conditional_write_unsupported` | 400 | You sent `If-Unmodified-Since` to an endpoint that does not evaluate it | Drop the header there |\n| `invalid_http_date` | 400 | `If-Unmodified-Since` is not an RFC 9110 HTTP date | Send back the `Last-Modified` value verbatim |\n| `webhooks_disabled` | 403 | Webhooks are not enabled for this tenant — applies to every `/webhook-endpoints` route | Ask a system administrator to enable webhooks under Administration → Webhook Endpoints |\n\n**Two things carry no `code`, on purpose:**\n\n- **Field validation.** A 422 out of the normal request validation already\n  carries `errors` keyed by field name — more precise than any code could be.\n  That format is untouched, and those responses have no `code`.\n- **A plain 403 from a permission check, or a 404 for a resource that is not\n  there.** At a single endpoint there is nothing to tell apart.\n\nSo: a `code` is present when this table lists one, and absent otherwise. Treat a\nmissing `code` as \"fall back to the status\".\n\n---\n\n### 10. The short list of things that catch people out\n\n1. **A shorter list is not an empty database.** Group visibility filters silently\n   and applies to every role. Put the token's account in the relevant groups.\n2. **A path makes a bad external id.** It changes when the object is renamed or\n   moved, and the next run then creates a second resource next to a stale one.\n   Use the source system's opaque id where there is one.\n3. **409 is never worth a retry.** The id is taken, possibly by something you\n   cannot see or by a different entity type. If the mapping in the way is your\n   own, `DELETE /{entity}/{ulid}/external-ref` releases it.\n4. **The 30-day window changes what a re-import means** — restore before,\n   fresh resource after. It does not apply to calendar events: those are deleted\n   for good, and a re-import always makes a new one.\n5. **`notify: false` only really does something for posts.**\n6. **Without `If-Unmodified-Since` the API writes unconditionally**, and with it\n   at an unsupported endpoint you get 400. Which of the two 400s it is, `code`\n   tells you — branch on that, never on `message`. The wording is\n   documentation; the code is the contract.\n7. **`Last-Modified` comes back on single-resource reads and on writes**, never\n   on a listing — there, read `updated_at`. And a re-scan wants `updated_since`\n   together with `sort=updated_at`: without the sort you are paging over the\n   creation order while records move underneath you, and you cannot advance a\n   watermark until the last page is in.\n8. **Use `origin`, not `content_hash`, for loop protection** — and note that a\n   delete has nothing but `origin`.\n9. **`DELETE /posts/{post}` and `DELETE /calendar/events/{event}` answer 200 with\n   a body**, the newer deletes answer 204.\n10. **The slug cannot be changed.** Wrong slug means a new token.\n11. **Write budget depends on the slug** — 3000/hour with one, 500/hour without.\n    A sync without a slug cannot use the by-external-id endpoints anyway, so if\n    you are pacing an import against 500/hour, check the token first.\n12. **`POST /groups` is not an upsert.** It creates, every time. And the group\n    `type_slug` is a slug from `GET /groups/types`, never the label that comes\n    back in `type`.\n13. **Creating groups needs pacing beyond the rate limit.** Each one flushes the\n    tenant's whole cache, so a burst of hundreds leaves everybody in that tenant\n    on a cold cache for the length of the import. Spread them out.\n\n---\n\n### 11. Related\n\n- [content-formats.md](content-formats.md) — TipTap JSON vs HTML vs Markdown and\n  the measured loss matrix. Read before choosing a wire format.\n- [webhooks.md](webhooks.md) — signature verification, retries, the full event\n  reference, `origin`.\n- `/docs/api` on your tenant — the generated OpenAPI reference with every\n  parameter and response schema.\n\n## Content Formats (REST API v1)\n\nKibi stores rich text as a **TipTap document** — a nested JSON structure. If your\nmaster data lives in GitHub (Markdown) or SharePoint (HTML), you do not have to\nrebuild that structure. Ask for the format your system speaks, and send the\nformat your system already has.\n\n### 1. The two parameters\n\n| | Where | Field | Values |\n|---|---|---|---|\n| **Reading** | query string | `?format=` | `json`, `html`, `markdown` |\n| **Writing** | request body | `content_format` | `json`, `html`, `markdown` |\n\nAnything else is refused with **422** and nothing is written. Both parameters are\noptional; leaving them out keeps the behaviour every existing integration\nalready sees.\n\n### 2. Which endpoints, and what each one defaults to\n\n| Resource | Field | Default | Endpoints |\n|---|---|---|---|\n| Wiki page | `content` | `json` | `GET/POST/PUT /api/v1/wiki…` |\n| Post | `body` | `json` | `GET/POST/PUT /api/v1/posts…` |\n| Task | `description` | **`html`** | `GET/POST/PUT /api/v1/tasks…` |\n\nTasks are the odd one out on purpose. `tasks.description` is an HTML column (the\nmirror of the TipTap source in `description_json`), and API v1 has always\nreturned and accepted HTML there. Making `json` the default would have broken\nevery integration that already reads the field, so the default follows what the\nresource has always been rather than being made uniform for its own sake.\n\nReading and writing are independent. `?format=` describes the response,\n`content_format` describes the payload — a `PUT` may send Markdown and read the\nresult back as JSON in the same call.\n\n### 3. What each format carries\n\nEvery format travels through HTML: Markdown is converted to HTML and then\nparsed into a TipTap document, and back the same way. There is exactly one HTML\nparser involved, the one that knows all of Kibi's custom nodes.\n\nThis table was **measured**, node by node, by taking a document through\n`json → format → json` and comparing the node types that came back. It is not a\nstatement of intent.\n\n| Node / mark | `json` | `html` | `markdown` |\n|---|---|---|---|\n| Headings, paragraphs, blockquote, horizontal rule | yes | yes | yes |\n| Bullet / ordered lists | yes | yes | yes |\n| Bold, italic, links, inline code | yes | yes | yes |\n| Code blocks (incl. language) | yes | yes | yes |\n| Images | yes | yes | yes (as `![alt](src)`) |\n| Tables | yes | yes | **no** — cell text only |\n| Callouts (info / tip / warning / important) | yes | yes | **no** — text only |\n| Step lists, grids, details/accordion | yes | yes | **no** — text only |\n| Task lists (checkboxes) | yes | yes | **no** — text only |\n| Draw.io diagrams | yes | yes | **degraded** — plain image |\n| YouTube, Vimeo, native video | yes | yes | **no** |\n| Lead paragraph, checked list | yes | yes | **no** |\n| Text alignment | yes | yes | **no** |\n| Highlight, sub/superscript, colour | yes | yes | **no** |\n| Resized images (`imageResize`) | yes | yes | **degraded** — plain image, size lost |\n| Loom embeds | yes | yes | **no** — dropped |\n| **Mentions** (`@name`) | yes | **no** — plain link | **no** |\n| **\"See also\" widget** | yes | **no** — dropped | **no** |\n| **Emoticons, voice placeholders, hurdles** | yes | **no** — dropped | **no** |\n\n**JSON is exact.** It is what Kibi stores; nothing is translated. If you cannot\nafford to lose anything, use JSON.\n\n**HTML is lossless for almost everything, but not quite.** Most custom nodes\nrender with a marker attribute (`data-callout-type`, `data-drawio`,\n`data-image-resize`, `data-loom-video`, `data-native-video`, …) and parse back\nfrom it, so a callout that leaves as HTML comes back a callout. The rows in\nbold above are the exceptions: those nodes have no HTML parser at all, so an\nHTML roundtrip flattens them.\n\nOne caveat on resized images: the node, its `src` and its `width`/`height`\nsurvive, but the first roundtrip copies the wrapper's `display: flex` onto the\nimage itself as an inline style. The second roundtrip no longer changes\nanything — the drift is one-off, not cumulative.\n\n> Until 2026-09-01 `imageResize` and `loom` were in the lossy group as well:\n> both rendered their marker attribute as an empty string, and the renderer\n> drops empty attributes, so the marker never reached the markup and the parse\n> rule could not match. A resized image came back as an ordinary image, a Loom\n> embed disappeared entirely.\n\n**Markdown is a projection, not a representation.** Markdown has no syntax for a\ncallout, a step list, a grid or a table cell's structure, so those constructs\narrive as their plain text. This is deliberate and it is tested — see\n`tests/Feature/Tenant/TipTap/ContentFormatRoundtripTest.php`, which pins both\nthe HTML roundtrip *and* the Markdown loss. The alternative — letting raw\n`<div>` blocks ride along inside the Markdown — was rejected: those blocks come\nback half-converted and reparse into structures the editor schema does not\nallow. A clean loss beats a broken document.\n\n**Use Markdown for content you own on the other side** (a Git repository is the\nsource, Kibi is the mirror). **Use JSON when Kibi is the source** and you need\nthe page back exactly as it was.\n\n### 4. Examples\n\nRead a wiki page as Markdown:\n\n```bash\ncurl -H \"Authorization: Bearer $TOKEN\" \\\n  \"https://acme.kibi.de/api/v1/wiki/01J…?format=markdown\"\n```\n\n```json\n{ \"data\": { \"id\": \"01J…\", \"content\": \"## Setup\\n\\nBitte **zuerst** lesen.\" } }\n```\n\nMirror a Markdown file from a repository onto its mapped page:\n\n```bash\ncurl -X PUT -H \"Authorization: Bearer $TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  \"https://acme.kibi.de/api/v1/wiki/by-external-id\" \\\n  -d '{\n        \"external_id\": \"docs/setup.md\",\n        \"title\": \"Setup\",\n        \"content\": \"## Setup\\n\\nBitte **zuerst** lesen.\",\n        \"content_format\": \"markdown\"\n      }'\n```\n\nMirror an issue body onto a task, addressed by the tracker's own key — the\nexternal id is whatever the source system calls the object, not necessarily a\npath:\n\n```bash\ncurl -X PUT -H \"Authorization: Bearer $TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  \"https://acme.kibi.de/api/v1/tasks/by-external-id\" \\\n  -d '{ \"external_id\": \"PROJ-4711\", \"title\": \"Fix login\",\n        \"description\": \"- [ ] reproduce\\n- [ ] fix\",\n        \"content_format\": \"markdown\" }'\n```\n\n### 5. Two things that will trip you up\n\n**A string field under a string format.** `content_format: html` or `markdown`\nmeans the field is a **string**. Sending a TipTap object alongside it is a\ncontradiction and is refused with 422 rather than guessed at. The reverse holds\nfor tasks: `content_format: json` means `description` is an **object**.\n\n**Omitting the field still means \"leave it alone\".** On the `by-external-id`\nendpoints a missing `content` / `body` / `description` keeps the stored value,\nwhatever `content_format` says. Sending an empty string does the same — it is\nnot a way to clear the field.\n\n### 6. Raw HTML inside Markdown\n\nCommonMark lets raw HTML through, so `<img src=x onerror=…>` inside a Markdown\npayload reaches Kibi as markup. It does not survive: everything written under\n`markdown` (and under `html` for wiki pages and posts) is parsed into a TipTap\ndocument, and that schema keeps only the attributes it knows about. Event\nhandlers, `<script>` and unknown tags are dropped at that point.\n\nThe one path that stores your markup verbatim is a **task** written with\n`content_format: html` — `tasks.description` is an HTML column and API v1 has\nalways taken it as-is. That is unchanged behaviour, not something the formats\nintroduced, but it is worth knowing if you relay third-party content into it."
+    "description": "RESTful API for Kibi Connect. Enables external applications and services to interact with your workspace data using bearer token authentication.\n\n## Syncing with an external system — quick reference\n\nIf the master data lives outside Kibi — files in OneDrive or SharePoint, Markdown in a Git repository, issues in a forge — you do not have to keep a table of Kibi ULIDs on your side. Wiki pages, tasks, posts, calendar events and groups can each carry an **external id** per integration, and you address them by that id — both when writing and when reading back.\n\nThis section is the summary. The full walkthrough — minting the token, the first import, both sync directions, deletes, loop protection and the list of things that catch people out — follows further down under *Syncing an external system with Kibi*, together with the content-format reference.\n\n### The slug, in short\n\nThe namespace comes from the **API token**, never from the payload. It is chosen when the token is minted, under **My profile > Integrations**, it can only be set by a **system administrator**, and it **cannot be changed afterwards** — a different slug means a different token. Format: `^[a-z0-9]+(-[a-z0-9]+)*$`, up to 64 characters.\n\nA token without a slug gets **422** from every endpoint below, and reads `external_ref: null` everywhere rather than another integration's mapping.\n\nHolding the slug is a permission, not a label: a token carrying it may work on every mapping of that integration in the tenant. That is why the field is restricted to system administrators.\n\n### Endpoints\n\n| Resource | Write through | Read back by your id | Delete |\n|---|---|---|---|\n| Wiki page | `PUT /api/v1/wiki/by-external-id` | `GET /api/v1/wiki?external_id=…` | `DELETE /api/v1/wiki/{ulid}` → 204 |\n| Task | `PUT /api/v1/tasks/by-external-id` | `GET /api/v1/tasks?external_id=…` | `DELETE /api/v1/tasks/{ulid}` → 204 |\n| Post | `PUT /api/v1/posts/by-external-id` | `GET /api/v1/posts?external_id=…` | `DELETE /api/v1/posts/{ulid}` → **200 with body** |\n| Calendar event | `PUT /api/v1/calendar/events/by-external-id` | `GET /api/v1/calendar/events?external_id=…` | `DELETE /api/v1/calendar/events/{ulid}` → **200 with body** |\n| Group | `POST /api/v1/groups` (create + map), `PUT \\| DELETE /api/v1/groups/{group}/external-ref` | `GET /api/v1/groups?external_id=…` | create and map only — an existing group is never changed |\n\nEvery resource above exposes `external_ref` (`integration`, `external_id`, `content_hash`, `last_synced_at`) or `null`.\n\nThe upsert answers **201** when it created a resource and **200** when it updated the already mapped one.\n\nGroups work differently, and on purpose. `POST /api/v1/groups` **creates** a group — with an optional `external_id`, so an ERP project number becomes a group and its mapping in one call — but nothing in v1 ever **changes** an existing group: no rename, no type or visibility switch, no membership, no delete. That is why there is no `PUT /api/v1/groups/by-external-id`, and why calling `POST /api/v1/groups` twice creates twice. The `type_slug` field takes a locale-independent slug, and the set is tenant-specific: ask `GET /api/v1/groups/types` for the slugs this tenant accepts (`groups:read` is enough) instead of guessing them. Do not confuse it with the response's `type`, which is the translated label and cannot be sent back.\n\n### Reading a resource back by your own id\n\nThere is no separate `by-external-id` **GET**: the read path is the `?external_id=` filter on the index endpoints above, and it answers with a **collection**, not with a single object. Since `integration + external_id` is unique per tenant, `data` holds exactly one entry or none — read `data[0]`, and treat `\"data\": []` as \"nothing is mapped to this id yet, go ahead and create it\". That is the normal answer, not an error; there is no 404 on this path. A token without an integration slug gets **422**.\n\nCareful with the encoding here: the id sits in the **query string**, not in the body, so slashes, spaces and umlauts have to be percent-encoded — `ordner/Ünterlagen 2026.docx` is requested as `?external_id=ordner%2F%C3%9Cnterlagen%202026.docx`.\n\nAn empty answer is no proof that the id is free. The index hides soft-deleted resources, archived tasks and everything outside the token account's group visibility, so an id can be taken by something you cannot see — that is the **409** on the upsert. Only the upsert answers the question reliably.\n\n### Which id to pick\n\n`external_id` is a **required field in the request body** — the same place the group endpoint takes it — not a path segment. Kibi never interprets it, so anything your source system uses is fine: a SharePoint item id (`01ABCDEF2GHIJK3LMNOP`), a Jira key (`PROJ-4711`), a numeric primary key (`12345t62124`), a file path (`docs/guides/setup.md`). Because it sits in the body, slashes, spaces and umlauts need no URL encoding — `ordner/Ünterlagen 2026.docx` goes over the wire as it is.\n\nThe one rule: **pick an id that does not change when the object is renamed or moved.** A path is the tempting choice and the wrong one — move the file one folder up and the next sync no longer recognises what it wrote last week, so it creates a second resource and the first goes stale. Where the source system has an opaque id (SharePoint, Jira, most databases), use that and keep the path in the title or the content.\n\n### What you have to know before you build this\n\n- **Results are filtered by what the token's account can see.** Wiki pages, tasks and posts bound to a group are invisible to a token whose owner is not a member — and they are missing *silently*. No role lifts this. For a complete sync, put that account into every relevant group.\n- **409 means the external id is taken** — tenant-wide, across entity types, possibly by something the token cannot see. A retry never helps; a different id does.\n- **A soft-deleted resource keeps its mapping for 30 days.** Writing to the same external id within that window **restores** the resource with its history and comments (**200**). After the daily garbage collection force-deletes it, the same request creates a new one (**201**). Restoring tasks needs `tasks.update.any`; for wiki pages and posts, update permission is enough.\n- **`notify: false`** on the upsert suppresses the announcement to all users. It matters for **posts** (on create and on update); wiki pages and tasks send no announcement anyway, so the flag is accepted there but does nothing. It never silences `@mention` notifications or webhooks.\n- **Conflict detection is opt-in.** Send `If-Unmodified-Since` with the `Last-Modified` value from your last single-resource read or write and a write that would overwrite a meanwhile-changed resource is refused with **412**. Listings carry no such header — take `updated_at` from the entry there. Without the header the write is unconditional. Sending the header to an endpoint that does not evaluate it answers **400** rather than ignoring it silently. An HTTP date is second-precise, so a change within the same second as your read is not caught.\n- **Break the sync loop with `origin`.** Every webhook payload carries `origin: {source, integration}`; skip any delivery whose `integration` is your own slug. It is the only guard that also works for deletes. See the webhook documentation for the event reference and signature verification.\n- **Rate limits:** 30 writes per minute and 500 per hour; 120 reads per minute and 5000 per hour. Plan a bulk import around the hourly write budget.\n\n`content_format` lets you send and read HTML or Markdown instead of the TipTap JSON described below — see the parameter documentation on each endpoint.\n\n## Rich Text Content Format (TipTap JSON)\n\nThe `body` (posts) and `content` (wiki) fields use **TipTap JSON** — a structured document format.\nYou can also send a plain text string, which will be auto-wrapped in a basic paragraph.\n\n### Document Structure\n\nEvery document is a `{\"type\": \"doc\", \"content\": [...]}` object containing an array of block nodes.\n\n### Block Nodes\n\n| Type | Description | Key Attributes |\n|------|------------|----------------|\n| `paragraph` | Text paragraph | `textAlign` |\n| `heading` | Section heading | `level` (1-3) |\n| `bulletList` | Unordered list (contains `listItem` nodes) | — |\n| `orderedList` | Ordered list (contains `listItem` nodes) | — |\n| `blockquote` | Quoted text block | — |\n| `codeBlock` | Code snippet | `language` |\n| `table` | Table with `tableRow`, `tableHeader`, `tableCell` | `colspan`, `rowspan` |\n| `callout` | Info/warning/danger box | `type` (`info`, `warning`, `danger`) |\n| `details` | Collapsible section (`detailsSummary` + `detailsContent`) | — |\n| `stepList` | Numbered step-by-step guide (contains `stepItem` nodes) | — |\n| `gridBuilder` | Multi-column layout (contains `gridBuilderColumn` nodes) | `data-cols`, `data-stack-at` |\n| `seeAlso` | Related page links | `pages` (array of `{ulid, title}`) |\n| `imageResize` | Image with sizing | `src`, `alt`, `containerStyle` |\n\n### Inline Marks\n\nText nodes support `marks` for formatting:\n\n| Mark | Example |\n|------|---------|\n| `bold` | `{\"type\": \"text\", \"marks\": [{\"type\": \"bold\"}], \"text\": \"important\"}` |\n| `italic` | `{\"type\": \"text\", \"marks\": [{\"type\": \"italic\"}], \"text\": \"note\"}` |\n| `code` | `{\"type\": \"text\", \"marks\": [{\"type\": \"code\"}], \"text\": \"config\"}` |\n| `link` | `{\"type\": \"text\", \"marks\": [{\"type\": \"link\", \"attrs\": {\"href\": \"https://...\"}}], \"text\": \"click\"}` |\n\n### Minimal Example\n\n```json\n{\n  \"type\": \"doc\",\n  \"content\": [\n    {\"type\": \"heading\", \"attrs\": {\"level\": 1}, \"content\": [{\"type\": \"text\", \"text\": \"Title\"}]},\n    {\"type\": \"paragraph\", \"content\": [\n      {\"type\": \"text\", \"text\": \"Hello \"},\n      {\"type\": \"text\", \"marks\": [{\"type\": \"bold\"}], \"text\": \"world\"}\n    ]},\n    {\"type\": \"callout\", \"attrs\": {\"type\": \"info\"}, \"content\": [\n      {\"type\": \"paragraph\", \"content\": [{\"type\": \"text\", \"text\": \"This is a note.\"}]}\n    ]}\n  ]\n}\n```\n\n## Syncing an external system with Kibi (REST API v1)\n\nThis guide is for the case where the master data does **not** live in Kibi: pages\nin OneDrive or SharePoint, Markdown files in a Git repository, issues in a\nforge. Kibi is the frontend your people use; the other system stays the source\nof truth, or both sides write and the two have to be reconciled.\n\nThe mechanism is a **mapping**: every wiki page, task, post, calendar event and\ngroup can carry one identifier per integration — the path of the file, the item\nid, the issue number. You write against that identifier and never have to keep a\ntable of Kibi ULIDs on your side.\n\nEverything below is REST API v1 (`/api/v1`), bearer-token authenticated. The\ninteractive endpoint reference lives at `/docs/api` on your tenant.\n\n---\n\n### 1. The two things you need to understand first\n\n#### The mapping\n\nOne row per (resource, integration) in `external_references`. Two uniqueness\nrules apply, and both will bite you at some point:\n\n- **`(integration, external_id)`** — an external id is used **once per\n  integration, across the whole tenant and across all entity types**. The same\n  `docs/setup.md` cannot be a wiki page and a task at the same time.\n- **`(resource, integration)`** — a resource carries at most one id per\n  integration. Writing a second one replaces the first.\n\nDifferent integrations are independent: a page can be `docs/setup.md` for\n`github` and `01ABC…` for `sharepoint` at the same time.\n\n#### The integration slug\n\nThe slug is **not** part of any payload. It is read from the API token\n(`App\\Support\\Api\\IntegrationContext`). That is the whole isolation model: a\ntoken *is* an integration, and it can only ever see and write its own mappings.\n\n- Chosen **when the token is minted**, under **My profile > Integrations**.\n- Only a **system administrator** can set it — the field is not even offered to\n  anyone else, and sending it anyway is rejected.\n- **Immutable.** There is no update endpoint for a token. A different slug means\n  a different token.\n- Format: `^[a-z0-9]+(-[a-z0-9]+)*$`, at most 64 characters — `github`,\n  `ms-entra`, `sharepoint-docs`.\n- A token **without** a slug gets **422** from every endpoint that needs one, and\n  reads back `external_ref: null` everywhere rather than someone else's mapping.\n\n> **The slug is a permission, not a label.** Whoever holds a token with the slug\n> `github` may work on every `github` mapping in the tenant — including\n> `DELETE /groups/{group}/external-ref` on a group they are not allowed to see.\n> That exemption is deliberate (see [section 8](#8-deleting)), and it is why the\n> field is restricted to system administrators.\n\n---\n\n### 2. What can be mapped\n\n| Resource | Read the mapping | Filter | Write through | Delete |\n|---|---|---|---|---|\n| Wiki page | `external_ref` on `GET /wiki`, `GET /wiki/{ulid}` | `?external_id=` | `PUT /wiki/by-external-id` | `DELETE /wiki/{ulid}` → 204 |\n| Task | `external_ref` on `GET /tasks`, `GET /tasks/{ulid}` | `?external_id=` | `PUT /tasks/by-external-id` | `DELETE /tasks/{ulid}` → 204 |\n| Post | `external_ref` on `GET /posts`, `GET /posts/{ulid}` | `?external_id=` | `PUT /posts/by-external-id` | `DELETE /posts/{ulid}` → **200 with body** |\n| Calendar event | `external_ref` on `GET /calendar/events`, `GET /calendar/events/{ulid}` | `?external_id=` | `PUT /calendar/events/by-external-id` | `DELETE /calendar/events/{ulid}` → **200 with body** |\n| Group | `external_ref` on `GET /groups`, `GET /groups/{ulid}` | `?external_id=` | `POST /groups` (create + map), `PUT /groups/{group}/external-ref` (map an existing one) | `DELETE /groups/{group}/external-ref` → 204 |\n\n`external_ref` is `null` when the resource carries no mapping for **your**\nintegration, and otherwise:\n\n```json\n\"external_ref\": {\n  \"integration\": \"github\",\n  \"external_id\": \"docs/guides/setup.md\",\n  \"content_hash\": \"9f2b…\",\n  \"last_synced_at\": \"2026-09-01T09:14:22+02:00\"\n}\n```\n\n**Groups are still the odd one out, but less than they were.** A sync can\n**create** a group — `POST /groups`, see [section 4a](#4a-creating-a-group) — and\nit can map an existing one. What it cannot do is **change** one: renaming,\nswitching the type or the visibility, archiving, deleting and membership all\nstay in Kibi. Those are the levers that decide who sees what, and they are not\nsomething a sync token should be able to move. There is consequently no\n`PUT /groups/by-external-id`: `POST /groups` creates, and calling it twice\ncreates twice (or answers 409, if you sent the same external id both times).\n`PUT /groups/{group}/external-ref` writes the mapping row and nothing else; the\ngroup object is not touched.\n\n**Calendar events differ in two ways** from wiki pages, tasks and posts, both\ncovered below: the schedule (`name`, `day`, and `start_time` or `full_day`) is\nrequired on **every** upsert including updates ([section 4](#4-step-2--the-first-import)),\nand a deleted event never comes back — it has no bin, so its mapping goes with\nit and the external id is released immediately ([section 8](#8-step-6--deleting)).\n\n> **Send a `type`, or nobody will see the events.** An event without one is\n> created as `personal`, which is visible to its creator and to invited\n> participants only — so a mirrored team calendar lands in the token owner's\n> account and nowhere else. Send `type: \"general\"` for something everyone\n> should see, or `type: \"group\"` together with `group_id`. The same rule holds\n> for updates: only the account that **created** an event may write it, so a\n> sync can update the events it imported itself but never one a person made in\n> Kibi.\n\n#### Choosing an external id\n\n`external_id` is a **required field in the request body** on all five write\nendpoints — the same place the group endpoint has always taken it, never a path\nsegment. That is the whole reason it moved: an id in the body needs no URL\nencoding, so slashes, spaces and umlauts survive untouched.\n`ordner/Ünterlagen 2026.docx` goes over the wire exactly as written.\n\nKibi never interprets the value, so anything the source system uses is a valid\nid:\n\n| Source system | A good `external_id` |\n|---|---|\n| SharePoint / OneDrive (Graph) | the item id — `01ABCDEF2GHIJK3LMNOP` |\n| Jira | the issue key — `PROJ-4711` |\n| A database of your own | the primary key — `12345t62124` |\n| A Git repository | the file path — `docs/guides/setup.md` |\n| A forge's issues | `repo/issues/42` |\n\n**The one rule: pick an id that does not change when the object is renamed or\nmoved.** This is where syncs actually go wrong. A path is the tempting choice\nand usually the wrong one — move the file one folder up and the next run no\nlonger recognises the page it wrote last week: it creates a second one, and the\nfirst goes stale with nothing pointing at it. Where the source system has an\nopaque id (SharePoint, Jira, most databases), address the object by that id and\ncarry the path in the title or the content, where it is allowed to change.\n\nA Git repository is the honest exception: the path *is* the identity there, and\nthere is nothing more stable to use. Accept that a `git mv` shows up in Kibi as\na new page plus an orphan, and delete the orphan on your side.\n\n---\n\n### 3. Step 1 — mint the token\n\nA system administrator opens **My profile > Integrations > Create token** and\nsets:\n\n- **Name** — free text, for humans.\n- **Scopes** — `wiki:read`, `wiki:write`, `tasks:read`, `tasks:write`,\n  `posts:read`, `posts:write`, `calendar:read`, `calendar:write`, `groups:read`,\n  `groups:write`. Take only what the sync needs.\n- **Integration slug** — `github`, `sharepoint`, whatever names your side.\n\nThe plaintext token is shown **once**. There is no way to retrieve it later and\nno way to change the slug afterwards.\n\n```bash\nexport TOKEN='kibi_…'\nexport BASE='https://acme.kibi.de/api/v1'\ncurl -s -H \"Authorization: Bearer $TOKEN\" \"$BASE/wiki?limit=1\"\n```\n\n#### The account behind the token matters more than you think\n\nA token belongs to the account that minted it, and **every request is filtered\nby what that account can see.** Wiki pages, tasks and posts bound to a group are\ninvisible to a token whose owner is not in that group — and they are invisible\n**silently**: the list is simply shorter. Nothing in the response says\n\"3 records were filtered out\". From the outside that looks exactly like data\nloss on the Kibi side.\n\nThis is not a role question. Holding SYSTEM_ADMIN does not lift the filter; the\nvisibility scope runs on the query regardless of role. **If the sync is meant to\ncover everything, put the token's account into every relevant group** — and\nre-check that after someone creates a new private group.\n\n---\n\n### 4. Step 2 — the first import\n\nWrite each source object to its external id. `PUT` is the only verb you need:\n**201** when nothing was mapped to that id yet, **200** when the mapped resource\nwas updated.\n\n```bash\ncurl -s -X PUT \"$BASE/wiki/by-external-id\" \\\n  -H \"Authorization: Bearer $TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n        \"external_id\": \"01ABCDEF2GHIJK3LMNOP\",\n        \"title\": \"Setup\",\n        \"content\": \"## Setup\\n\\nRead this first.\",\n        \"content_format\": \"markdown\",\n        \"notify\": false\n      }'\n```\n\nFour things about the payload:\n\n- **`external_id` is a required body field**, not a path segment — see\n  [Choosing an external id](#choosing-an-external-id) for what to put in it.\n- **Omitted fields stay untouched.** Leaving out `content` keeps the stored\n  content; sending an empty string does the same. There is no way to clear a\n  field by omission. The one exception is the calendar event's schedule: `name`,\n  `day` and either `start_time` or `full_day: true` are required on every call,\n  update included. An event *is* its point in time, and the create branch has no\n  earlier state to fall back on.\n- **`content_format`** picks the wire format — `json` (TipTap, the default for\n  wiki and posts), `html` or `markdown`. Tasks default to `html`. Calendar\n  events take **no** `content_format` at all: their `description` is plain text\n  on the way in and the stored HTML on the way out, as it has been since v1\n  shipped. Read\n  [content-formats.md](content-formats.md) before you choose; the short version\n  is that **HTML is not fully lossless** (a handful of node types — mentions,\n  the \"see also\" widget, emoticon/voice/hurdle nodes — flatten on the way\n  through) and **Markdown loses considerably more**\n  (everything Markdown has no syntax for: tables, callouts, step lists, grids).\n  Use HTML if your system speaks it, Markdown only when the other side owns the\n  content anyway, JSON when Kibi is the source of truth.\n- **`notify: false`** on a bulk import. See below.\n\n#### `notify`\n\nDefaults to `true`. It exists for the first import, where a few hundred\nresources arriving at once should not announce themselves to the whole\nworkforce.\n\nWhere it actually does something today:\n\n| Endpoint | Effect of `notify: false` |\n|---|---|\n| `PUT /posts/by-external-id` | **Real.** Suppresses the announcement to all users — on create *and* on update, including the update that follows a restore. |\n| `PUT /wiki/by-external-id` | None. Wiki pages send no announcement on creation. |\n| `PUT /tasks/by-external-id` | None. Tasks created here send no announcement. |\n| `PUT /calendar/events/by-external-id` | None. The endpoint assigns neither participants nor external guests, so nobody is invited and nobody is notified. |\n\nIt is accepted on all four so the payload is the same shape everywhere; on wiki,\ntasks and calendar events it is a no-op you can leave in.\n\nWhat `notify: false` does **not** silence, even on posts: people named with an\n`@mention` in the body still get their notification (that message is addressed to\na person, not to the workforce), and webhook subscribers still receive\n`post.created` / `post.updated`.\n\n#### Budget the import against the rate limit\n\n| | Per minute | Per hour |\n|---|---|---|\n| Reads, any token | 120 | 5000 |\n| Writes, **token with an integration slug** | 120 | 3000 |\n| Writes, personal token (no slug) | 30 | 500 |\n\nA token that carries an integration slug gets the larger write budget because it\nis a machine, and because only a system administrator can issue one. An import\nof 2000 objects runs in about 17 minutes on it. On a personal token the same\nimport takes at least four hours.\n\nExpect `429` with a `Retry-After` when you exceed either limit. The minute limit\nis there to absorb a burst — a batch your side flushes at once; the hour limit is\nwhat bounds a sync that has gone into a loop.\n\nThe counter is keyed by the **token**, so two integrations calling from the same\negress address get a bucket each and neither can lock the other out. Requests\nthat arrive without a valid token — a wrong or revoked one included — fall back\nto a per-IP bucket, which is what keeps guessing at tokens capped.\n\n> Two things changed on 2026-09-01, both of which make the numbers above\n> larger than what you actually got before:\n>\n> - The counter used to be keyed by IP for everyone — the limiter ran before the\n>   token was resolved, so the fallback applied to every request.\n> - Every `/api/v1` request also passed a second, older limiter of **60 per\n>   minute per IP**, which was the smaller and therefore the effective number.\n>   The 120 reads per minute documented here were never reachable. That limiter\n>   no longer applies to v1.\n>\n> If you paced an import around either, you can go faster now.\n\n#### Groups have a second budget, and it is not the rate limit\n\n`POST /groups` ([section 4a](#4a-creating-a-group)) is the one write in this API\nwhere the rate limit is not the binding constraint. Every group creation\ninvalidates the tenant's cache — and not just the group's own entries: the cache\nis tag-based, and flushing one tag flushes the tenant's whole cache with it.\nCreating a group therefore empties the cache for **everyone working in that\ntenant at that moment**, and every page they open afterwards rebuilds from the\ndatabase.\n\nOne group is nothing. Three hundred groups fired back to back inside the 3000/h\nwrite budget is a tenant that spends the whole import with a cold cache, which\npeople notice as a platform that has become slow for no visible reason.\n\n**So pace group creation deliberately, not against the rate limit.** Spread it\nover the run — a short pause between groups, or a batch per interval — and\nwhere you can, put it outside working hours. This is the one endpoint where\nstaying under the limit is not enough.\n\nNone of the other write endpoints behave this way; for wiki pages, tasks, posts\nand calendar events the rate limit really is the only ceiling.\n\n---\n\n### 4a. Creating a group\n\nGroups are the one entity a sync can bring into existence but never change. The\ncase this is built for: a project number in the ERP should become a group in\nKibi, and the project number is the external id.\n\n```bash\ncurl -s -X POST -H \"Authorization: Bearer $TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n        \"name\": \"Neubau Halle 4\",\n        \"type_slug\": \"project\",\n        \"description\": \"Projektgruppe zur Baustelle in Rheine.\",\n        \"external_id\": \"P-2026-0815\"\n      }' \\\n  \"$BASE/groups\"\n```\n\n**201** with the group, `external_ref` included. Fields:\n\n| Field | | |\n|---|---|---|\n| `name` | required | |\n| `type_slug` | optional | a **slug**, see below. Defaults to `miscellaneous`. |\n| `description` | optional | plain text, or a TipTap document |\n| `visibility` | optional | `all` (default) or `members` |\n| `external_id` | optional | your own id; creates the mapping in the same call |\n\nEverything else a group can have — cover image, location, templates, the tool\nlist, membership — is deliberately not here. A sync does not need it, and each\nof those would be a second way to configure a group next to Kibi itself.\n\nThe ERP project number is a textbook `external_id` by the rule in\n[Choosing an external id](#choosing-an-external-id): it is assigned once and\nsurvives every rename of the project. Renaming the group in Kibi does not touch\nit either, so the mapping holds in both directions.\n\nAlso see the pacing note in\n[section 4](#groups-have-a-second-budget-and-it-is-not-the-rate-limit) before\nyou import a few hundred of these — group creation is the one write in this API\nwhere the rate limit is not the binding constraint.\n\n#### Ask for the types, do not guess them\n\n`type_slug` takes a locale-independent **slug**, and the set is not fixed: next to\nthe six standard types every tenant has, a tenant can define its own. There is\nno way to guess those, which is what `GET /groups/types` is for:\n\n```bash\ncurl -s -H \"Authorization: Bearer $TOKEN\" \"$BASE/groups/types\"\n```\n\n```json\n{\n  \"data\": [\n    { \"value\": \"department\", \"label\": \"Abteilung\", \"standard\": true },\n    { \"value\": \"project\",    \"label\": \"Projekt\",   \"standard\": true },\n    { \"value\": \"baustelle\",  \"label\": \"Baustelle\", \"standard\": false }\n  ]\n}\n```\n\n`standard: false` marks a type this tenant added for itself. Every `value` in\nthe list is accepted by `type_slug`; anything else is a **422**. The endpoint needs\n`groups:read` only.\n\nTwo of the standard types are HR-managed — `department` and `location`. They are\nlisted for everyone, but creating a group with one of them needs a token whose\naccount may manage them, and otherwise answers 422. A mirror of an ERP wants\n`project` anyway. The same applies to `visibility: \"members\"`: introducing it\ntakes a token that may manage groups.\n\nAPI v1 cannot create a *type*. A slug that is missing from the list has to be\nadded once by a system administrator in Kibi before the sync can use it.\n\n> **`type_slug` on both sides; `type` is display only.** The field you send is\n> `type_slug`, and the slug you sent comes back under the same name. `type` in\n> the response is the label a person sees, translated into the tenant's\n> language — `\"Projekt\"`, not `\"project\"` — so it cannot be sent back.\n>\n> `POST /groups` does still accept the slug under `type`, the name the endpoint\n> first shipped with. It is deprecated, it means exactly `type_slug`, and\n> `type_slug` wins when both are sent. Do not build on it.\n\n#### It is a create, not an upsert\n\nCalling it twice creates two groups. There is no `PUT /groups/by-external-id`,\nbecause that endpoint would have to *update* a group on the second call, and\nupdating groups is exactly what stays out of v1. If your sync may run against\ngroups it wrote earlier, ask first:\n\n```bash\ncurl -s -H \"Authorization: Bearer $TOKEN\" \"$BASE/groups?external_id=P-2026-0815\"\n```\n\nAn empty `data` means nothing is mapped to that id — but see\n[section 5](#an-empty-answer-is-not-proof-the-id-is-free): the honest answer\ncomes from the **409**. If you send an `external_id` that is already taken, no\ngroup is created at all; the group row and its mapping are written in one\ntransaction, so a lost race leaves nothing behind.\n\n`external_id` is optional here — leave it out and you get a group with no\nmapping, which is also the only case where the endpoint works on a token\n**without** an integration slug. With an id and without a slug the answer is\n**422**, and no group is created.\n\n#### What creating a group sets off\n\nMore than a row in a table, and a bulk import should know it:\n\n- **The token's own account joins the group as administrator.** Not a side\n  effect to work around — it is what keeps the group visible to the sync\n  afterwards, since every read is filtered by what that account can see\n  ([section 3](#the-account-behind-the-token-matters-more-than-you-think)). It\n  is also the answer to the visibility problem that section raises: for groups\n  the sync created itself, you never have to remember to add the account\n  anywhere.\n\n  The flip side is worth stating plainly: **the account accumulates one such\n  membership per created group.** After 300 project groups it administers 300\n  groups, it appears in each of their member lists, and it receives whatever a\n  group administrator receives. That is correct behaviour, not a leak — but if\n  you were expecting a machine account that stays out of everybody's way, this\n  is where it does not.\n- A **group chat** and a **file folder** are created for the group.\n- If the tenant switched on *notify administrators about new groups*, every\n  system administrator is notified — **once per group**. There is no flag on the\n  endpoint to suppress this (unlike `notify` on the post upsert): it is a tenant\n  setting, and it is off unless somebody turned it on. Check it before importing\n  a few hundred groups — that is a few hundred notifications per administrator.\n- **Every creation flushes the tenant's cache.** This is the constraint that\n  actually bites on a bulk import, and it has its own note in\n  [section 4](#groups-have-a-second-budget-and-it-is-not-the-rate-limit): staying\n  under the rate limit is not enough, spread the creates out.\n\n---\n\n### 5. Step 3 — reading back\n\nThis is the read counterpart to the upsert: *give me the resource I know under\nmy own id*. There is no separate endpoint for it — the index endpoints take\n`?external_id=` as a filter:\n\n```bash\ncurl -s -H \"Authorization: Bearer $TOKEN\" \\\n  \"$BASE/wiki?external_id=01ABCDEF2GHIJK3LMNOP\"\n```\n\nThe filter applies to all five index endpoints and **requires a token with a\nslug** — without one it is 422, not an empty result.\n\nReading back by your own id is the lookup. For the sweep — *everything that\nchanged since T* — see `updated_since` below.\n\n#### It answers with a collection, not with one object\n\n`integration + external_id` is unique across the tenant, so the list holds at\nmost one entry — but it is still a list, and your code has to read `data[0]`:\n\n```json\n{ \"data\": [ { \"id\": \"01j8x…\", \"title\": \"Setup\", \"external_ref\": { … } } ] }\n```\n\nNothing mapped to that id looks like this — **not** a 404:\n\n```json\n{ \"data\": [] }\n```\n\nAn empty `data` is the normal, expected answer for \"I have not written this\nobject to Kibi yet\", and the right reaction is to create it with the upsert.\nDo not treat it as an error.\n\n#### The id goes in the query string, so encode it\n\nThis is the one place where the encoding problem the upsert no longer has still\napplies. A query parameter carrying slashes, spaces or umlauts has to be\npercent-encoded:\n\n```bash\n# external_id = ordner/Ünterlagen 2026.docx\ncurl -s -H \"Authorization: Bearer $TOKEN\" \\\n  \"$BASE/wiki?external_id=ordner%2F%C3%9Cnterlagen%202026.docx\"\n```\n\nMost HTTP clients do this for you if you pass the value as a query parameter\nrather than pasting it into the URL string — use that path and the question does\nnot come up.\n\n#### `updated_since` — the catch-up scan\n\nThe other way to read back: *what changed since I last looked?* Every index\nendpoint takes `?updated_since=` with an ISO 8601 moment, and answers with the\nrecords whose `updated_at` is at or after it.\n\n```bash\ncurl -s -H \"Authorization: Bearer $TOKEN\" \\\n  \"$BASE/wiki?updated_since=2026-09-01T00:00:00%2B00:00&sort=updated_at&limit=50\"\n```\n\nThis is the filter you need when webhooks were down and a full re-scan is the\nonly way back. It is deliberately about the **change** date, not the creation\ndate: a page written last year and edited this morning comes back, which is\nexactly the record a creation-date filter would miss and exactly the one your\nsync is missing.\n\nThe comparison is **inclusive**, and the stored timestamps are second-precision.\nThe record sitting exactly on your watermark therefore arrives once more on the\nnext run. That is at-least-once, on purpose — the alternative would drop every\nchange that happened in the same second as your watermark. Writing it through\nthe upsert again costs nothing.\n\n#### `sort=updated_at` — walk the pages and move the watermark\n\nEvery index endpoint keeps the order it always had: `created_at` descending for\nwiki pages and tasks, `published_at` descending for posts, `name` for groups,\n`day` + `start_time` for calendar events. `?sort=updated_at` switches to\n**least recently changed first** — ascending, the other way round from every\ndefault here.\n\nThat direction is the point. A catch-up scan works the oldest changes first, so\nafter each page it can move its watermark to the last `updated_at` it saw and\nresume there if it dies halfway. Descending, it would have to finish every page\nbefore it could record anything.\n\nBoth orders now break ties on the record id. Without that, two records carrying\nthe same second — the normal case after a bulk import — could swap places\nbetween two queries, so page 1 returned a record and page 2 returned it again\nwhile another was never shown at all. Postgres makes no promise about the order\nof equal rows, and the scan silently lost data.\n\nAn unknown `sort` value is a **422**, not a silent fallback: a caller who\nbelieved they had re-sorted would advance a watermark against the wrong order.\n\nThe response shape is unchanged — `data`, `links`, `meta` with `total` and\n`last_page`, the same offset pagination as before.\n\n#### An empty answer is not proof the id is free\n\n**The index is not an existence check.** It never returns soft-deleted\nresources, `GET /tasks` additionally excludes archived tasks, and everything\noutside the token account's group visibility is missing silently. An external id\ncan be taken by something the list does not show you — which is exactly the 409\ndescribed in [section 6](#6-step-4--the-ongoing-inbound-sync-external--kibi).\nThe upsert is the only reliable answer to \"is this id taken?\"; it looks through\nsoft-deletes on purpose.\n\n---\n\n### 6. Step 4 — the ongoing inbound sync (external → Kibi)\n\nExactly the same `PUT` as the import, without `notify: false`. Nothing else\nchanges: 201 for new, 200 for existing, omitted fields untouched.\n\n#### 409 — the external id is taken\n\n**A retry never helps.** 409 means `(your slug, that external id)` is already\nmapped, to something you cannot see or to a different entity type. The resource\nbehind it is neither revealed nor modified — visibility wins over uniqueness.\n\nYour options are: pick a different external id, or — if the mapping in the way\nis one your own integration holds — release it first:\n\n| Entity | Unlink |\n|---|---|\n| Wiki page | `DELETE /api/v1/wiki/{ulid}/external-ref` |\n| Task | `DELETE /api/v1/tasks/{ulid}/external-ref` |\n| Post | `DELETE /api/v1/posts/{ulid}/external-ref` |\n| Group | `DELETE /api/v1/groups/{group}/external-ref` |\n| Calendar event | none needed — see below |\n\nCalendar events need no unlink endpoint: they have no bin, so deleting one\nreleases its external id at once.\n\nSee *Releasing a mapping* below for what these endpoints do and do not touch.\n\n#### 412 — someone edited it in Kibi meanwhile\n\nWiki pages are edited collaboratively in the browser. A page can be open in\nsomebody's editor while your sync writes over it. To prevent that:\n\n1. Take the `Last-Modified` value from your last single-resource read\n   (`GET /wiki/{ulid}`, `/tasks/{ulid}`, `/posts/{ulid}`,\n   `/calendar/events/{ulid}`) or from your previous write to that resource. From\n   a listing, take the entry's `updated_at` and convert it to an HTTP date.\n2. Send it as `If-Unmodified-Since` on the next write.\n3. **412** means it changed in the meantime; nothing was written. Re-read, merge,\n   retry.\n\n```bash\ncurl -s -X PUT \"$BASE/wiki/by-external-id\" \\\n  -H \"Authorization: Bearer $TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -H 'If-Unmodified-Since: Wed, 21 Oct 2026 07:28:00 GMT' \\\n  -d '{\"external_id\": \"01ABCDEF2GHIJK3LMNOP\", \"title\": \"Setup\", \"content\": \"…\", \"content_format\": \"markdown\"}'\n```\n\nFour things worth knowing:\n\n- **Without the header, the write is unconditional.** That is the pre-existing\n  behaviour of API v1 and it is kept deliberately. Conflict detection is opt-in.\n- **Only some endpoints evaluate it** — the eight `by-external-id` and `{id}`\n  update routes for wiki, tasks, posts and calendar events. Sending the header\n  at any **other** write endpoint answers **400** and writes\n  nothing. That is on purpose: a silently ignored header would let you believe\n  you were protected when you were not.\n- **`Last-Modified` comes back on single-resource reads and on writes, not on\n  listings.** `GET /wiki/{ulid}` and its three siblings carry the header, as\n  does every write that evaluates the precondition. A listing — including the\n  `?external_id=` read-back — does not: a page of results has no single\n  timestamp, and the newest one on the page would be a licence to overwrite the\n  older entries. Use `updated_at` from the entry there.\n- **Second granularity.** An HTTP date has no sub-second precision, so an edit\n  that lands in the *same second* as your read slips through undetected. This is\n  inherent to the mechanism, not a bug that will be fixed.\n\nAn unparseable date is **400**, not a silent pass.\n\n---\n\n### 7. Step 5 — the ongoing outbound sync (Kibi → external)\n\nSubscribe to webhooks. The full guide — enabling the feature, creating the\nendpoint, verifying the HMAC signature, the retry policy and the complete event\nlist — is [webhooks.md](webhooks.md). The events relevant to a sync are\n`wiki_page.created/updated/deleted`, `task.created/updated/completed/assigned`\nand `post.created/updated/deleted`.\n\n#### Break the loop\n\nYour write into Kibi produces a webhook. If your receiver treats it as a change\nand writes back, the two systems ping-pong forever.\n\n**Every webhook payload carries `origin`:**\n\n```json\n\"origin\": { \"source\": \"api\", \"integration\": \"github\" }\n```\n\n`source` is `\"api\"` for a change that came in through API v1 with a token and\n`\"ui\"` for everything else (a person in Kibi, a job, a console command).\n`integration` is the slug of the token that made the write, or `null`.\n\nIgnore any delivery where `origin.integration` is your own slug:\n\n```js\nif (payload.data.origin?.integration === 'github') return res.status(200).send('own write');\n```\n\nThat is the reliable guard, and it is the **only** one that works for deletes —\na delete has no content to compare.\n\n`content_hash` on the mapping is a secondary signal: it holds the SHA-256 of the\ncontent Kibi stored at your last write through the API. If it is unchanged\nbetween two reads, nothing was written through your integration since. Note that\nrecomputing the hash on your side means reproducing Kibi's normalisation\n(recursive key sorting before serialisation) — do not build your loop protection\non that. Use `origin`.\n\nTwo more things about webhooks that matter for a sync, both detailed in\n[webhooks.md](webhooks.md): **order is not guaranteed** (reorder on\n`X-Kibi-Timestamp` if you depend on it), and a receiver that takes longer than\n10 seconds counts as a failed attempt.\n\n---\n\n### 8. Step 6 — deleting\n\n| Endpoint | Answer |\n|---|---|\n| `DELETE /api/v1/wiki/{ulid}` | **204**, no body |\n| `DELETE /api/v1/tasks/{ulid}` | **204**, no body |\n| `DELETE /api/v1/posts/{ulid}` | **200** with `{\"message\": \"Post deleted successfully.\"}` |\n| `DELETE /api/v1/calendar/events/{ulid}` | **200** with `{\"message\": \"Calendar event deleted successfully.\"}` |\n| `DELETE /api/v1/wiki/{ulid}/external-ref` | **204**, no body — mapping only |\n| `DELETE /api/v1/tasks/{ulid}/external-ref` | **204**, no body — mapping only |\n| `DELETE /api/v1/posts/{ulid}/external-ref` | **204**, no body — mapping only |\n| `DELETE /api/v1/groups/{group}/external-ref` | **204**, no body — mapping only |\n\nThe post and calendar endpoints are inconsistent with the other two and stay\nthat way: they predate them, and changing their status code would break every\nintegration already reading that body. Handle both.\n\nWiki, task and post deletes are **soft** deletes. A wiki page with subpages is\nrefused with **422** — move or delete the children first.\n\n#### The calendar event is the exception: it is deleted for good\n\nA calendar event has **no bin**. `DELETE /calendar/events/{ulid}` removes the\nrow, and the mapping goes with it — the external id is free again **at once**.\nWriting to that id afterwards creates a brand-new event and answers **201**, with\na new ULID and no history.\n\nEverything in the next section is therefore about wiki pages, tasks and posts\nonly. For calendar events there is no 30-day window and nothing to restore: a\ndelete is final, and re-importing the same source appointment produces a\ndifferent event.\n\n#### For the other three, the mapping survives a delete, for 30 days\n\nThis is the single most consequential detail on this page.\n\nA soft-deleted resource **keeps** its mapping. Writing to the same external id\nagain therefore does not create a duplicate — it **restores** the resource with\nits history and comments and updates it, answering **200**.\n\nA daily garbage collector force-deletes what has been in the bin for more than\n**30 days** — `kibi:garbage-collect-wiki-content`, `…-posts`, `…-tasks` and\n`…-groups`, one per mappable entity, all with the same window. A force-delete\ntakes the mapping with it and releases the external id.\n\nSo the same request has two different outcomes depending on when it arrives:\n\n| A source file comes back… | Result |\n|---|---|\n| within 30 days of the delete | **200** — the original page is restored, history and comments intact |\n| after 30 days | **201** — a brand-new page, no history, no comments, new ULID |\n\nRestoring is checked as a permission of its own, but on all three resource types\nit now asks the same question as `update`: whoever may update the resource may\nbring it back. A token that may write a resource can therefore always restore\nit.\n\n> Until 2026-09-01 tasks were the exception: restoring one required\n> `tasks.update.any`, a manager permission, so a token that could update its own\n> tasks got **403** on the restore and the restore path was unusable for a\n> normal integration.\n\n#### Releasing a mapping\n\nEvery mappable entity has an unlink endpoint, and they all behave the same way:\n\n```\nDELETE /api/v1/wiki/{ulid}/external-ref\nDELETE /api/v1/tasks/{ulid}/external-ref\nDELETE /api/v1/posts/{ulid}/external-ref\nDELETE /api/v1/groups/{group}/external-ref\n```\n\nAll answer **204** and remove **only** the mapping your token's integration\nholds. The resource is not touched — not deleted, not restored, not changed, not\neven its `updated_at`. A `sharepoint` mapping on the same resource survives a\ncall from a `github` token untouched.\n\n**This is the way out of an external id you picked wrong.** The classic case:\nyour integration keyed on file paths, found out — as this guide warns — that a\nrename breaks that, and now wants to move to stable item ids. Without an unlink\nthe old ids stay taken until the resource leaves the bin 30 days later, and every\nattempt to reuse one answers 409.\n\nThese endpoints also reach a resource that has become **invisible since you\nwrote the mapping** — soft-deleted, moved into a group you are not in, set back\nto draft, or switched to members-only — and they reach it for exactly one\nreason: to release the external id. The resource stays deleted, stays invisible,\nis not restored and is not revealed. Without that exemption its external id would\nstay blocked tenant-wide with no way out short of a database intervention.\n**Holding the mapping is the permission to release it** — your integration wrote\nthat row itself, and had to pass the visibility check to do so.\n\nThey are idempotent: a resource with no mapping for your integration also answers\n204. But if there was nothing to delete **and** you cannot see the resource, you\nget the same refusal its single read gives you — **404** for wiki pages, tasks\nand posts, **403** for groups. The idempotent 204 must not become an existence\noracle for resources you cannot see.\n\n---\n\n### 9. Status codes on the sync endpoints\n\n| Code | Meaning | Retry? |\n|---|---|---|\n| 200 | Existing resource updated (or restored and updated) | — |\n| 201 | New resource created | — |\n| 204 | Deleted / mapping removed | — |\n| 400 | `If-Unmodified-Since` sent to an endpoint that does not evaluate it, or an unparseable date | No — fix the request |\n| 403 | The token's account may not create/update/restore this resource. On calendar events this is the flat rule that only the creator may write one — so a sync can only update events its own token created | No |\n| 404 | No resource with that ULID (or not visible to this token) | No |\n| 409 | The external id is already taken in this integration | **Never** — use a different id |\n| 412 | Changed since your `If-Unmodified-Since`; nothing written | Yes, after re-reading |\n| 422 | Token has no integration slug, unknown `content_format`, unknown or HR-managed group `type_slug`, wiki page has subpages, validation | No — fix the request or the token |\n| 429 | Rate limit; honour `Retry-After` | Yes, later |\n\n#### `code` — branch on this, not on the message\n\nThe status alone does not say enough. Five unrelated things answer **422**, and\nthey ask for five different reactions: a new token, a code change on your side, a\ncorrected request, a business decision, a fixed field. Telling them apart used to\nmean matching on an English sentence — and those sentences change whenever\nsomebody improves a wording.\n\nError responses therefore carry a `code` **next to** `message`:\n\n```json\n{\n  \"message\": \"This external id is already mapped to a resource you cannot see.\",\n  \"code\": \"external_id_taken\"\n}\n```\n\n`message` is unchanged, word for word. **Branch on `code`, log `message`.** A\ncode is never renamed; if a case is ever split more finely, a new code appears\nbeside it.\n\n| `code` | Status | What it means | What to do |\n|---|---|---|---|\n| `external_id_taken` | 409 | `(your slug, that external id)` is already mapped, possibly to something you cannot see or to another entity type | Use a different id, or release your own mapping with `DELETE /{entity}/{ulid}/external-ref` |\n| `integration_slug_missing` | 422 | The token carries no integration slug | Ask an administrator for a new token — the slug cannot be added later |\n| `invalid_external_id` | 422 | `?external_id=` did not arrive as a plain string (typically `?external_id[]=…`) | Fix the query string |\n| `unknown_content_format` | 422 | `format` / `content_format` is not one of `json`, `html`, `markdown` | Fix your client |\n| `has_subpages` | 422 | The wiki page still has children and was not deleted | Move or delete the children first |\n| `restore_forbidden` | 403 | The external id points at a deleted resource this account may not restore | Different account, or a different id |\n| `precondition_failed` | 412 | The resource changed after your `If-Unmodified-Since`; nothing was written | Re-read, merge, retry |\n| `conditional_write_unsupported` | 400 | You sent `If-Unmodified-Since` to an endpoint that does not evaluate it | Drop the header there |\n| `invalid_http_date` | 400 | `If-Unmodified-Since` is not an RFC 9110 HTTP date | Send back the `Last-Modified` value verbatim |\n\n**Two things carry no `code`, on purpose:**\n\n- **Field validation.** A 422 out of the normal request validation already\n  carries `errors` keyed by field name — more precise than any code could be.\n  That format is untouched, and those responses have no `code`.\n- **A plain 403 from a permission check, or a 404 for a resource that is not\n  there.** At a single endpoint there is nothing to tell apart.\n\nSo: a `code` is present when this table lists one, and absent otherwise. Treat a\nmissing `code` as \"fall back to the status\".\n\n---\n\n### 10. The short list of things that catch people out\n\n1. **A shorter list is not an empty database.** Group visibility filters silently\n   and applies to every role. Put the token's account in the relevant groups.\n2. **A path makes a bad external id.** It changes when the object is renamed or\n   moved, and the next run then creates a second resource next to a stale one.\n   Use the source system's opaque id where there is one.\n3. **409 is never worth a retry.** The id is taken, possibly by something you\n   cannot see or by a different entity type. If the mapping in the way is your\n   own, `DELETE /{entity}/{ulid}/external-ref` releases it.\n4. **The 30-day window changes what a re-import means** — restore before,\n   fresh resource after. It does not apply to calendar events: those are deleted\n   for good, and a re-import always makes a new one.\n5. **`notify: false` only really does something for posts.**\n6. **Without `If-Unmodified-Since` the API writes unconditionally**, and with it\n   at an unsupported endpoint you get 400. Which of the two 400s it is, `code`\n   tells you — branch on that, never on `message`. The wording is\n   documentation; the code is the contract.\n7. **`Last-Modified` comes back on single-resource reads and on writes**, never\n   on a listing — there, read `updated_at`. And a re-scan wants `updated_since`\n   together with `sort=updated_at`: without the sort you are paging over the\n   creation order while records move underneath you, and you cannot advance a\n   watermark until the last page is in.\n8. **Use `origin`, not `content_hash`, for loop protection** — and note that a\n   delete has nothing but `origin`.\n9. **`DELETE /posts/{post}` and `DELETE /calendar/events/{event}` answer 200 with\n   a body**, the newer deletes answer 204.\n10. **The slug cannot be changed.** Wrong slug means a new token.\n11. **Write budget depends on the slug** — 3000/hour with one, 500/hour without.\n    A sync without a slug cannot use the by-external-id endpoints anyway, so if\n    you are pacing an import against 500/hour, check the token first.\n12. **`POST /groups` is not an upsert.** It creates, every time. And the group\n    `type_slug` is a slug from `GET /groups/types`, never the label that comes\n    back in `type`.\n13. **Creating groups needs pacing beyond the rate limit.** Each one flushes the\n    tenant's whole cache, so a burst of hundreds leaves everybody in that tenant\n    on a cold cache for the length of the import. Spread them out.\n\n---\n\n### 11. Related\n\n- [content-formats.md](content-formats.md) — TipTap JSON vs HTML vs Markdown and\n  the measured loss matrix. Read before choosing a wire format.\n- [webhooks.md](webhooks.md) — signature verification, retries, the full event\n  reference, `origin`.\n- `/docs/api` on your tenant — the generated OpenAPI reference with every\n  parameter and response schema.\n\n## Content Formats (REST API v1)\n\nKibi stores rich text as a **TipTap document** — a nested JSON structure. If your\nmaster data lives in GitHub (Markdown) or SharePoint (HTML), you do not have to\nrebuild that structure. Ask for the format your system speaks, and send the\nformat your system already has.\n\n### 1. The two parameters\n\n| | Where | Field | Values |\n|---|---|---|---|\n| **Reading** | query string | `?format=` | `json`, `html`, `markdown` |\n| **Writing** | request body | `content_format` | `json`, `html`, `markdown` |\n\nAnything else is refused with **422** and nothing is written. Both parameters are\noptional; leaving them out keeps the behaviour every existing integration\nalready sees.\n\n### 2. Which endpoints, and what each one defaults to\n\n| Resource | Field | Default | Endpoints |\n|---|---|---|---|\n| Wiki page | `content` | `json` | `GET/POST/PUT /api/v1/wiki…` |\n| Post | `body` | `json` | `GET/POST/PUT /api/v1/posts…` |\n| Task | `description` | **`html`** | `GET/POST/PUT /api/v1/tasks…` |\n\nTasks are the odd one out on purpose. `tasks.description` is an HTML column (the\nmirror of the TipTap source in `description_json`), and API v1 has always\nreturned and accepted HTML there. Making `json` the default would have broken\nevery integration that already reads the field, so the default follows what the\nresource has always been rather than being made uniform for its own sake.\n\nReading and writing are independent. `?format=` describes the response,\n`content_format` describes the payload — a `PUT` may send Markdown and read the\nresult back as JSON in the same call.\n\n### 3. What each format carries\n\nEvery format travels through HTML: Markdown is converted to HTML and then\nparsed into a TipTap document, and back the same way. There is exactly one HTML\nparser involved, the one that knows all of Kibi's custom nodes.\n\nThis table was **measured**, node by node, by taking a document through\n`json → format → json` and comparing the node types that came back. It is not a\nstatement of intent.\n\n| Node / mark | `json` | `html` | `markdown` |\n|---|---|---|---|\n| Headings, paragraphs, blockquote, horizontal rule | yes | yes | yes |\n| Bullet / ordered lists | yes | yes | yes |\n| Bold, italic, links, inline code | yes | yes | yes |\n| Code blocks (incl. language) | yes | yes | yes |\n| Images | yes | yes | yes (as `![alt](src)`) |\n| Tables | yes | yes | **no** — cell text only |\n| Callouts (info / tip / warning / important) | yes | yes | **no** — text only |\n| Step lists, grids, details/accordion | yes | yes | **no** — text only |\n| Task lists (checkboxes) | yes | yes | **no** — text only |\n| Draw.io diagrams | yes | yes | **degraded** — plain image |\n| YouTube, Vimeo, native video | yes | yes | **no** |\n| Lead paragraph, checked list | yes | yes | **no** |\n| Text alignment | yes | yes | **no** |\n| Highlight, sub/superscript, colour | yes | yes | **no** |\n| Resized images (`imageResize`) | yes | yes | **degraded** — plain image, size lost |\n| Loom embeds | yes | yes | **no** — dropped |\n| **Mentions** (`@name`) | yes | **no** — plain link | **no** |\n| **\"See also\" widget** | yes | **no** — dropped | **no** |\n| **Emoticons, voice placeholders, hurdles** | yes | **no** — dropped | **no** |\n\n**JSON is exact.** It is what Kibi stores; nothing is translated. If you cannot\nafford to lose anything, use JSON.\n\n**HTML is lossless for almost everything, but not quite.** Most custom nodes\nrender with a marker attribute (`data-callout-type`, `data-drawio`,\n`data-image-resize`, `data-loom-video`, `data-native-video`, …) and parse back\nfrom it, so a callout that leaves as HTML comes back a callout. The rows in\nbold above are the exceptions: those nodes have no HTML parser at all, so an\nHTML roundtrip flattens them.\n\nOne caveat on resized images: the node, its `src` and its `width`/`height`\nsurvive, but the first roundtrip copies the wrapper's `display: flex` onto the\nimage itself as an inline style. The second roundtrip no longer changes\nanything — the drift is one-off, not cumulative.\n\n> Until 2026-09-01 `imageResize` and `loom` were in the lossy group as well:\n> both rendered their marker attribute as an empty string, and the renderer\n> drops empty attributes, so the marker never reached the markup and the parse\n> rule could not match. A resized image came back as an ordinary image, a Loom\n> embed disappeared entirely.\n\n**Markdown is a projection, not a representation.** Markdown has no syntax for a\ncallout, a step list, a grid or a table cell's structure, so those constructs\narrive as their plain text. This is deliberate and it is tested — see\n`tests/Feature/Tenant/TipTap/ContentFormatRoundtripTest.php`, which pins both\nthe HTML roundtrip *and* the Markdown loss. The alternative — letting raw\n`<div>` blocks ride along inside the Markdown — was rejected: those blocks come\nback half-converted and reparse into structures the editor schema does not\nallow. A clean loss beats a broken document.\n\n**Use Markdown for content you own on the other side** (a Git repository is the\nsource, Kibi is the mirror). **Use JSON when Kibi is the source** and you need\nthe page back exactly as it was.\n\n### 4. Examples\n\nRead a wiki page as Markdown:\n\n```bash\ncurl -H \"Authorization: Bearer $TOKEN\" \\\n  \"https://acme.kibi.de/api/v1/wiki/01J…?format=markdown\"\n```\n\n```json\n{ \"data\": { \"id\": \"01J…\", \"content\": \"## Setup\\n\\nBitte **zuerst** lesen.\" } }\n```\n\nMirror a Markdown file from a repository onto its mapped page:\n\n```bash\ncurl -X PUT -H \"Authorization: Bearer $TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  \"https://acme.kibi.de/api/v1/wiki/by-external-id\" \\\n  -d '{\n        \"external_id\": \"docs/setup.md\",\n        \"title\": \"Setup\",\n        \"content\": \"## Setup\\n\\nBitte **zuerst** lesen.\",\n        \"content_format\": \"markdown\"\n      }'\n```\n\nMirror an issue body onto a task, addressed by the tracker's own key — the\nexternal id is whatever the source system calls the object, not necessarily a\npath:\n\n```bash\ncurl -X PUT -H \"Authorization: Bearer $TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  \"https://acme.kibi.de/api/v1/tasks/by-external-id\" \\\n  -d '{ \"external_id\": \"PROJ-4711\", \"title\": \"Fix login\",\n        \"description\": \"- [ ] reproduce\\n- [ ] fix\",\n        \"content_format\": \"markdown\" }'\n```\n\n### 5. Two things that will trip you up\n\n**A string field under a string format.** `content_format: html` or `markdown`\nmeans the field is a **string**. Sending a TipTap object alongside it is a\ncontradiction and is refused with 422 rather than guessed at. The reverse holds\nfor tasks: `content_format: json` means `description` is an **object**.\n\n**Omitting the field still means \"leave it alone\".** On the `by-external-id`\nendpoints a missing `content` / `body` / `description` keeps the stored value,\nwhatever `content_format` says. Sending an empty string does the same — it is\nnot a way to clear the field.\n\n### 6. Raw HTML inside Markdown\n\nCommonMark lets raw HTML through, so `<img src=x onerror=…>` inside a Markdown\npayload reaches Kibi as markup. It does not survive: everything written under\n`markdown` (and under `html` for wiki pages and posts) is parsed into a TipTap\ndocument, and that schema keeps only the attributes it knows about. Event\nhandlers, `<script>` and unknown tags are dropped at that point.\n\nThe one path that stores your markup verbatim is a **task** written with\n`content_format: html` — `tasks.description` is an HTML column and API v1 has\nalways taken it as-is. That is unchanged behaviour, not something the formats\nintroduced, but it is worth knowing if you relay third-party content into it."
   },
   "servers": [
     {
-      "url": "https://your-tenant.kibi.de/api/v1",
-      "description": "Your Kibi Connect tenant"
+      "url": "https://connect.test/api/v1"
     }
   ],
   "security": [
@@ -930,6 +929,498 @@
                   "required": [
                     "message",
                     "code"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/call/links": {
+      "get": {
+        "operationId": "v1.call.links.index",
+        "description": "Returns the links this token mapped to its own namespace, newest first —\nnot every link in the tenant. Filter by `external_id` to find one\nappointment again without keeping a table of Kibi ids.\n\nThe answer stays a collection: `data` holds exactly one entry or none,\nnever a bare object. A missing mapping is not a 404 here. The id sits in\nthe query string and must be **URL-encoded**.",
+        "summary": "List the meeting links of this integration",
+        "tags": [
+          "CallLink"
+        ],
+        "parameters": [
+          {
+            "name": "external_id",
+            "in": "query",
+            "description": "Return only the link mapped to this external id. Requires a token with an integration slug and must be **URL-encoded**.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Number of results per page (1-50, default: 15).",
+            "schema": {
+              "type": "integer",
+              "default": 15
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated set of `CallLinkResource`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/CallLinkResource"
+                      }
+                    },
+                    "links": {
+                      "type": "object",
+                      "properties": {
+                        "first": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "last": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "prev": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "next": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "first",
+                        "last",
+                        "prev",
+                        "next"
+                      ]
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "current_page": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "from": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 1
+                        },
+                        "last_page": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "links": {
+                          "type": "array",
+                          "description": "Generated paginator links.",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "url": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "label": {
+                                "type": "string"
+                              },
+                              "active": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "url",
+                              "label",
+                              "active"
+                            ]
+                          }
+                        },
+                        "path": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "description": "Base path for paginator generated URLs."
+                        },
+                        "per_page": {
+                          "type": "integer",
+                          "description": "Number of items shown per page.",
+                          "minimum": 0
+                        },
+                        "to": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "description": "Number of the last item in the slice.",
+                          "minimum": 1
+                        },
+                        "total": {
+                          "type": "integer",
+                          "description": "Total number of items being paginated.",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "current_page",
+                        "from",
+                        "last_page",
+                        "links",
+                        "path",
+                        "per_page",
+                        "to",
+                        "total"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "links",
+                    "meta"
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationException"
+          }
+        }
+      },
+      "post": {
+        "operationId": "v1.call.links.store",
+        "description": "Returns a join URL under `/meet/{slug}` that guests open without a Kibi\naccount. Pass `host_email` to make the meeting belong to the person who\nwas booked; without it the link belongs to the token's owner.\n\nPass `external_id` to map the link to the appointment in your own system.\nThe mapping is what lets you reschedule or cancel later without keeping a\ntable of Kibi ids — `integration + external_id` is unique across the\ntenant, so a second link for the same appointment is refused with 409.\n\nA one-time link that carries `scheduled_at` expires an hour after the\nmeeting ends unless you set `expires_at` yourself.",
+        "summary": "Create a meeting link",
+        "tags": [
+          "CallLink"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StoreCallLinkRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "`CallLinkResource`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/CallLinkResource"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string",
+                      "description": "Error overview.",
+                      "example": "This external id is already mapped to a resource you cannot see."
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationException"
+          }
+        }
+      }
+    },
+    "/call/links/{callLink}": {
+      "get": {
+        "operationId": "v1.call.links.show",
+        "description": "Addressed by its Kibi id. To find a link by the id it carries in your own\nsystem, filter the listing with `?external_id=`.",
+        "summary": "Read a meeting link",
+        "tags": [
+          "CallLink"
+        ],
+        "parameters": [
+          {
+            "name": "callLink",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`CallLinkResource`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/CallLinkResource"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                }
+              }
+            },
+            "headers": {
+              "Last-Modified": {
+                "description": "RFC 7231 date of this resource, as Kibi has it right now. Send it back as `If-Unmodified-Since` on your next write and the write is refused with 412 if somebody changed the resource in between.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "v1.call.links.update",
+        "description": "The endpoint a rescheduled appointment calls: move `scheduled_at`, adjust\nthe duration, push `expires_at` out. Host, type and visibility are fixed\nat creation time and cannot be changed here.\n\nA link can also be edited inside Kibi, so send the `Last-Modified` value\nfrom your last read back as `If-Unmodified-Since` and the write is refused\nwith **412** instead of overwriting what the host just changed.",
+        "summary": "Update a meeting link",
+        "tags": [
+          "CallLink"
+        ],
+        "parameters": [
+          {
+            "name": "callLink",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Unmodified-Since",
+            "in": "header",
+            "description": "RFC 7231 date from a previous Last-Modified. The write is refused with 412 if the resource changed after it.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCallLinkRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "`CallLinkResource`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/CallLinkResource"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                }
+              }
+            },
+            "headers": {
+              "Last-Modified": {
+                "description": "RFC 7231 date of this resource, as Kibi has it right now. Send it back as `If-Unmodified-Since` on your next write and the write is refused with 412 if somebody changed the resource in between.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationException"
+          },
+          "400": {
+            "description": "The If-Unmodified-Since header is not a valid HTTP date. `code`: `invalid_http_date`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message",
+                    "code"
+                  ]
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "The link was modified after the If-Unmodified-Since date. Nothing was written. `code`: `precondition_failed`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message",
+                    "code"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "v1.call.links.destroy",
+        "description": "The link stops admitting anyone and disappears from the host's meeting\nlist, but the row stays: a call that already happened keeps its recording,\nits minutes and its participants, and all of that hangs off this link.\nThe external mapping stays too, so a cancelled appointment that gets\nrebooked under the same id is refused with 409 rather than silently\nreusing a dead link — release it first with `DELETE .../external-ref`.",
+        "summary": "Deactivate a meeting link",
+        "tags": [
+          "CallLink"
+        ],
+        "parameters": [
+          {
+            "name": "callLink",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string",
+                      "const": "Meeting link deactivated."
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/call/links/{callLink}/external-ref": {
+      "delete": {
+        "operationId": "v1.call.links.external-ref.delete",
+        "description": "Frees the external id for a new link without touching the link itself.",
+        "summary": "Release the external mapping of a meeting link",
+        "tags": [
+          "CallLink"
+        ],
+        "parameters": [
+          {
+            "name": "callLink",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string",
+                      "const": "External reference removed."
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "An error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string",
+                      "description": "Error overview.",
+                      "example": "This meeting link is not mapped to your integration."
+                    }
+                  },
+                  "required": [
+                    "message"
                   ]
                 }
               }
@@ -2700,7 +3191,7 @@
     "/groups/{group}/files": {
       "get": {
         "operationId": "v1.groups.files",
-        "description": "Returns a paginated list of files attached to a specific group.\nAuthorization follows GroupPolicy::viewFiles. Files are returned with download URLs.",
+        "description": "Returns the files of the group's file area — the group root **and every\nfolder below it**, as one flat, paginated list, newest first. Each file\nnames the folder it sits in: `folder` holds `id`, `name` and `path`\n(folder names from the group root down, joined with `/`), or `null` for a\nfile lying directly in the group root. Authorization follows\nGroupPolicy::viewFiles.\n\n```bash\ncurl -H \"Authorization: Bearer kbc_...\" \\\n  \"https://<tenant>.kibi.de/api/v1/groups/01J.../files?folder=01K...&limit=50\"\n```\n\nNarrow the listing with `folder` (the `id` of a folder from\n`GET /api/v1/groups/{group}/folders`) and `recursive`: by default a\nlisting reaches into all subfolders, `recursive=0` keeps it to the\nstart folder — or to the group root when no `folder` is given.\n\n`id` is the uuid of the file's current binary and changes when someone\nuploads a new version; `item_id` is the id of the file in Kibi and\nstays. Key a sync on `item_id`.\n\nEvery file is checked against the file permissions of the token's\naccount after the page was cut, so a page may hold fewer entries than\n`limit` and `meta.total` can count files that do not show up. Page on\nuntil `meta.last_page` rather than until `data` comes back short.\n\nA group without a file area yet, or with its files tool switched off,\nanswers an empty list. A `folder` that is not part of this group's file\narea — or not visible to the token — answers 404.",
         "summary": "List group files",
         "tags": [
           "Group"
@@ -2715,8 +3206,26 @@
             }
           },
           {
+            "name": "folder",
+            "in": "query",
+            "description": "Folder `id` from `GET /api/v1/groups/{group}/folders`. Lists this folder (and, unless `recursive=0`, its subfolders) instead of the whole file area.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "recursive",
+            "in": "query",
+            "description": "Whether to include files of subfolders. `1`/`true` (default) or `0`/`false`. Without `folder`, `0` lists only the files lying directly in the group root.",
+            "schema": {
+              "type": "string",
+              "default": "1"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
+            "description": "Number of results per page (1-50, default: 15).",
             "schema": {
               "type": "integer",
               "default": 15
@@ -2725,7 +3234,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Paginated set of `MediaItemResource`",
+            "description": "The files, newest first. `meta` additionally carries `group_id`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2734,7 +3243,7 @@
                     "data": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/MediaItemResource"
+                        "$ref": "#/components/schemas/GroupFileResource"
                       }
                     },
                     "links": {
@@ -2840,9 +3349,6 @@
                           "type": "integer",
                           "description": "Total number of items being paginated.",
                           "minimum": 0
-                        },
-                        "group_id": {
-                          "type": "string"
                         }
                       },
                       "required": [
@@ -2853,8 +3359,7 @@
                         "path",
                         "per_page",
                         "to",
-                        "total",
-                        "group_id"
+                        "total"
                       ]
                     }
                   },
@@ -2862,6 +3367,75 @@
                     "data",
                     "links",
                     "meta"
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "An error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string",
+                      "description": "Error overview.",
+                      "example": "Dies ist eine private Gruppe."
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationException"
+          },
+          "404": {
+            "$ref": "#/components/responses/ModelNotFoundException"
+          }
+        }
+      }
+    },
+    "/groups/{group}/folders": {
+      "get": {
+        "operationId": "v1.groups.folders",
+        "description": "Returns every folder of the group's file area as a flat list — the\ngroup root itself is the context of the call and not part of it.\n`parent_id` is `null` for a folder directly in the group root, `depth`\nis `1` there; `path` joins the folder names from the root down with `/`.\nThe list is ordered by `path`, so a parent always comes before its\nchildren. Authorization follows GroupPolicy::viewFiles.\n\n```bash\ncurl -H \"Authorization: Bearer kbc_...\" \\\n  \"https://<tenant>.kibi.de/api/v1/groups/01J.../folders\"\n```\n\n```json\n{\n  \"data\": [\n    { \"id\": \"01K...\", \"name\": \"Unterlagen\", \"parent_id\": null, \"path\": \"Unterlagen\", \"depth\": 1 },\n    { \"id\": \"01M...\", \"name\": \"Angebote\", \"parent_id\": \"01K...\", \"path\": \"Unterlagen/Angebote\", \"depth\": 2 }\n  ]\n}\n```\n\nFolder names may contain `/` themselves. Use `path` to read and match,\nand `parent_id` when you rebuild the tree.\n\nNot paginated: a tree cut into pages leaves subtrees without their\nparent. Folders the token's account may not see are left out together\nwith everything below them, and so are folders in the trash. A group\nwithout a file area yet, or with its files tool switched off, answers\nan empty list.",
+        "summary": "List group folders",
+        "tags": [
+          "Group"
+        ],
+        "parameters": [
+          {
+            "name": "group",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The folders of the group's file area, ordered by path.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/GroupFolderResource"
+                      }
+                    }
+                  },
+                  "required": [
+                    "data"
                   ]
                 }
               }
@@ -5926,314 +6500,6 @@
         }
       }
     },
-    "/webhook-endpoints/events": {
-      "get": {
-        "operationId": "v1.webhook-endpoints.events",
-        "description": "Load this instead of hardcoding the list. It grows, and a stale copy in\nan integration fails in the quietest possible way: the endpoint is\ncreated without complaint and simply never fires for the event you meant\nto subscribe to.\n\nThese are the only events a webhook endpoint accepts. Kibi has a second,\nlarger event system internally — do not go looking for it; subscribing\nto one of its names is rejected with 422.",
-        "summary": "List the events a webhook endpoint can subscribe to",
-        "tags": [
-          "WebhookEndpoint"
-        ],
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "events": {
-                          "type": "array",
-                          "items": {}
-                        }
-                      },
-                      "required": [
-                        "events"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "data"
-                  ]
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Webhooks are not enabled for this tenant. `code`: `webhooks_disabled`.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "message": {
-                      "type": "string"
-                    },
-                    "code": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "message",
-                    "code"
-                  ]
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/webhook-endpoints": {
-      "get": {
-        "operationId": "v1.webhook-endpoints.index",
-        "description": "Ownership is `external_references`, not who created the endpoint.\nEndpoints created in Kibi's administration carry no mapping and are\ndeliberately invisible here — they belong to the tenant, not to an\nintegration, and a sync token has no business listing or switching off\nsomething a human set up by hand. An endpoint mapped to a DIFFERENT\nintegration is equally invisible, for the same reason `external_ref`\nnever shows another integration's mapping: it would leak under which id\na foreign system tracks the same object.",
-        "summary": "List the webhook endpoints this integration owns",
-        "tags": [
-          "WebhookEndpoint"
-        ],
-        "parameters": [
-          {
-            "name": "external_id",
-            "in": "query",
-            "description": "Return only the endpoint mapped to this external id. The response stays a collection: `data` holds exactly one entry or none, never a bare object. URL-encode the value.",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Array of `WebhookEndpointResource`",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "data": {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/WebhookEndpointResource"
-                      }
-                    }
-                  },
-                  "required": [
-                    "data"
-                  ]
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "An error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "message": {
-                      "type": "string",
-                      "description": "Error overview.",
-                      "example": "The external_id must be a string."
-                    }
-                  },
-                  "required": [
-                    "message"
-                  ]
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "operationId": "v1.webhook-endpoints.store",
-        "description": "The signing secret is in the response body **once**. Kibi stores only a\nhash and an encrypted copy for signing; there is no endpoint that hands\nit out again. Lose it and the only cure is to delete the endpoint and\ncreate a new one.",
-        "summary": "Create a webhook endpoint owned by the calling integration",
-        "tags": [
-          "WebhookEndpoint"
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/StoreWebhookEndpointRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "data": {
-                      "$ref": "#/components/schemas/WebhookEndpointResource"
-                    },
-                    "secret": {
-                      "type": "string",
-                      "description": "The HMAC signing secret. Shown **once**, here, and never again. Store it before you do anything else — every delivery is signed with it, and without it you cannot tell a real webhook from a forged one."
-                    }
-                  },
-                  "required": [
-                    "data",
-                    "secret"
-                  ]
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The external id is already mapped to another resource in this tenant. No endpoint was created. `code`: `external_id_taken`.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "message": {
-                      "type": "string"
-                    },
-                    "code": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "message",
-                    "code"
-                  ]
-                }
-              }
-            }
-          },
-          "422": {
-            "$ref": "#/components/responses/ValidationException"
-          }
-        }
-      }
-    },
-    "/webhook-endpoints/{webhookEndpoint}": {
-      "put": {
-        "operationId": "v1.webhook-endpoints.update",
-        "description": "Nicht Teil dieses Endpunkts: die external_id. Die wird beim Anlegen\nvergeben und ist danach die Identitaet des Endpunkts — sie hier\numzuhaengen waere ein Eigentuemerwechsel per PUT.",
-        "summary": "Update name, url, events and the active flag on an owned endpoint",
-        "tags": [
-          "WebhookEndpoint"
-        ],
-        "parameters": [
-          {
-            "name": "webhookEndpoint",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateWebhookEndpointRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "data": {
-                      "$ref": "#/components/schemas/WebhookEndpointResource"
-                    }
-                  },
-                  "required": [
-                    "data"
-                  ]
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "An error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "message": {
-                      "type": "string",
-                      "description": "Error overview.",
-                      "example": "Managing webhook endpoints is restricted to system administrators. The webhooks scope on the token is not enough on its own."
-                    }
-                  },
-                  "required": [
-                    "message"
-                  ]
-                }
-              }
-            }
-          },
-          "422": {
-            "$ref": "#/components/responses/ValidationException"
-          }
-        }
-      },
-      "delete": {
-        "operationId": "v1.webhook-endpoints.destroy",
-        "description": "Das Mapping raeumt HasExternalReferences am `deleted`-Ereignis mit weg —\ndie external_id ist danach sofort wieder frei fuer einen neuen Endpunkt.",
-        "summary": "Delete an owned endpoint and free its external id",
-        "tags": [
-          "WebhookEndpoint"
-        ],
-        "parameters": [
-          {
-            "name": "webhookEndpoint",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "No content"
-          },
-          "403": {
-            "description": "An error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "message": {
-                      "type": "string",
-                      "description": "Error overview.",
-                      "example": "Managing webhook endpoints is restricted to system administrators. The webhooks scope on the token is not enough on its own."
-                    }
-                  },
-                  "required": [
-                    "message"
-                  ]
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/wiki": {
       "get": {
         "operationId": "v1.wiki.index",
@@ -7114,6 +7380,314 @@
           }
         }
       }
+    },
+    "/webhook-endpoints": {
+      "get": {
+        "operationId": "v1.webhook-endpoints.index",
+        "description": "Ownership is `external_references`, not who created the endpoint.\nEndpoints created in Kibi's administration carry no mapping and are\ndeliberately invisible here — they belong to the tenant, not to an\nintegration, and a sync token has no business listing or switching off\nsomething a human set up by hand. An endpoint mapped to a DIFFERENT\nintegration is equally invisible, for the same reason `external_ref`\nnever shows another integration's mapping: it would leak under which id\na foreign system tracks the same object.",
+        "summary": "List the webhook endpoints this integration owns",
+        "tags": [
+          "WebhookEndpoint"
+        ],
+        "parameters": [
+          {
+            "name": "external_id",
+            "in": "query",
+            "description": "Return only the endpoint mapped to this external id. The response stays a collection: `data` holds exactly one entry or none, never a bare object. URL-encode the value.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Array of `WebhookEndpointResource`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/WebhookEndpointResource"
+                      }
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string",
+                      "description": "Error overview.",
+                      "example": "The external_id must be a string."
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "v1.webhook-endpoints.store",
+        "description": "The signing secret is in the response body **once**. Kibi stores only a\nhash and an encrypted copy for signing; there is no endpoint that hands\nit out again. Lose it and the only cure is to delete the endpoint and\ncreate a new one.",
+        "summary": "Create a webhook endpoint owned by the calling integration",
+        "tags": [
+          "WebhookEndpoint"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StoreWebhookEndpointRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/WebhookEndpointResource"
+                    },
+                    "secret": {
+                      "type": "string",
+                      "description": "The HMAC signing secret. Shown **once**, here, and never again. Store it before you do anything else — every delivery is signed with it, and without it you cannot tell a real webhook from a forged one."
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "secret"
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The external id is already mapped to another resource in this tenant. No endpoint was created. `code`: `external_id_taken`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message",
+                    "code"
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationException"
+          }
+        }
+      }
+    },
+    "/webhook-endpoints/events": {
+      "get": {
+        "operationId": "v1.webhook-endpoints.events",
+        "description": "Load this instead of hardcoding the list. It grows, and a stale copy in\nan integration fails in the quietest possible way: the endpoint is\ncreated without complaint and simply never fires for the event you meant\nto subscribe to.\n\nThese are the only events a webhook endpoint accepts. Kibi has a second,\nlarger event system internally — do not go looking for it; subscribing\nto one of its names is rejected with 422.",
+        "summary": "List the events a webhook endpoint can subscribe to",
+        "tags": [
+          "WebhookEndpoint"
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "events": {
+                          "type": "array",
+                          "items": {}
+                        }
+                      },
+                      "required": [
+                        "events"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Webhooks are not enabled for this tenant. `code`: `webhooks_disabled`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "message",
+                    "code"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/webhook-endpoints/{webhookEndpoint}": {
+      "put": {
+        "operationId": "v1.webhook-endpoints.update",
+        "description": "Nicht Teil dieses Endpunkts: die external_id. Die wird beim Anlegen\nvergeben und ist danach die Identitaet des Endpunkts — sie hier\numzuhaengen waere ein Eigentuemerwechsel per PUT.",
+        "summary": "Update name, url, events and the active flag on an owned endpoint",
+        "tags": [
+          "WebhookEndpoint"
+        ],
+        "parameters": [
+          {
+            "name": "webhookEndpoint",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateWebhookEndpointRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/WebhookEndpointResource"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "An error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string",
+                      "description": "Error overview.",
+                      "example": "Managing webhook endpoints is restricted to system administrators. The webhooks scope on the token is not enough on its own."
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationException"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "v1.webhook-endpoints.destroy",
+        "description": "Das Mapping raeumt HasExternalReferences am `deleted`-Ereignis mit weg —\ndie external_id ist danach sofort wieder frei fuer einen neuen Endpunkt.",
+        "summary": "Delete an owned endpoint and free its external id",
+        "tags": [
+          "WebhookEndpoint"
+        ],
+        "parameters": [
+          {
+            "name": "webhookEndpoint",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No content"
+          },
+          "403": {
+            "description": "An error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string",
+                      "description": "Error overview.",
+                      "example": "Managing webhook endpoints is restricted to system administrators. The webhooks scope on the token is not enough on its own."
+                    }
+                  },
+                  "required": [
+                    "message"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -7170,10 +7744,30 @@
             "type": "string"
           },
           "start_time": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "00:00"
+                ]
+              }
+            ]
           },
           "end_time": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "23:59"
+                ]
+              }
+            ]
           },
           "full_day": {
             "type": "boolean"
@@ -7182,6 +7776,22 @@
             "type": "string"
           },
           "is_recurring": {
+            "type": "string"
+          },
+          "starts_at": {
+            "type": "string",
+            "description": "RFC 5545 fields — additive only, alongside day/start_time/\nend_time/full_day above, never replacing them."
+          },
+          "ends_at": {
+            "type": "string"
+          },
+          "tzid": {
+            "type": "string"
+          },
+          "uid": {
+            "type": "string"
+          },
+          "rrule": {
             "type": "string"
           },
           "group": {
@@ -7228,6 +7838,11 @@
           "full_day",
           "type",
           "is_recurring",
+          "starts_at",
+          "ends_at",
+          "tzid",
+          "uid",
+          "rrule",
           "external_ref",
           "created_at",
           "updated_at"
@@ -7243,6 +7858,136 @@
           "resource"
         ],
         "title": "CalendarType"
+      },
+      "CallLinkResource": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "description": "The public join URL. This is the value a booking system puts into its own meeting-link field — guests open it without a Kibi account."
+          },
+          "slug": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string"
+          },
+          "scheduled_at": {
+            "type": "string"
+          },
+          "duration_minutes": {
+            "type": "string"
+          },
+          "guests_allowed": {
+            "type": "boolean"
+          },
+          "waiting_room": {
+            "type": "boolean"
+          },
+          "max_participants": {
+            "type": "string"
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "host": {
+            "type": "object",
+            "description": "The Kibi user the meeting belongs to — the one who sees it under their meeting links and joins as host.",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "email": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "email"
+            ]
+          },
+          "external_ref": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Read-only, filled in by Kibi: how this link is mapped to an appointment in the calling token's integration, or null when there is no mapping. You never send this block — set `external_id` when you create the link.",
+            "properties": {
+              "integration": {
+                "type": "string"
+              },
+              "external_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "integration",
+              "external_id"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "url",
+          "slug",
+          "title",
+          "description",
+          "type",
+          "visibility",
+          "scheduled_at",
+          "duration_minutes",
+          "guests_allowed",
+          "waiting_room",
+          "max_participants",
+          "is_active",
+          "expires_at",
+          "host",
+          "external_ref",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "CallLinkResource"
+      },
+      "CallLinkType": {
+        "type": "string",
+        "enum": [
+          "persistent",
+          "one_time"
+        ],
+        "title": "CallLinkType"
+      },
+      "CallLinkVisibility": {
+        "type": "string",
+        "enum": [
+          "public",
+          "private"
+        ],
+        "title": "CallLinkVisibility"
       },
       "ClockInRequest": {
         "type": "object",
@@ -7494,6 +8239,131 @@
         ],
         "title": "ExternalReferenceResource"
       },
+      "GroupFileResource": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The uuid of the file's current binary. It changes when a new version is uploaded — key a sync on `item_id`."
+          },
+          "item_id": {
+            "type": "string",
+            "description": "The id of the file in Kibi. Stays the same across versions."
+          },
+          "name": {
+            "type": "string"
+          },
+          "file_name": {
+            "type": "string"
+          },
+          "mime_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size": {
+            "type": "integer",
+            "description": "Bytes."
+          },
+          "url": {
+            "type": "string"
+          },
+          "preview_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "folder": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Null when the file lies directly in the group root.",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "path"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Last change of the file, including a new version."
+          }
+        },
+        "required": [
+          "id",
+          "item_id",
+          "name",
+          "file_name",
+          "mime_type",
+          "size",
+          "url",
+          "preview_url",
+          "folder",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "GroupFileResource"
+      },
+      "GroupFolderResource": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null when the folder sits directly in the group root."
+          },
+          "path": {
+            "type": "string"
+          },
+          "depth": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "parent_id",
+          "path",
+          "depth",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "GroupFolderResource"
+      },
       "GroupPostResource": {
         "type": "object",
         "properties": {
@@ -7618,55 +8488,6 @@
         "type": "array",
         "items": {},
         "title": "LengthAwarePaginator"
-      },
-      "MediaItemResource": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "name": {
-            "type": "string"
-          },
-          "file_name": {
-            "type": "string"
-          },
-          "mime_type": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "size": {
-            "type": "integer"
-          },
-          "url": {
-            "type": "string"
-          },
-          "preview_url": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "created_at": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "file_name",
-          "mime_type",
-          "size",
-          "url",
-          "preview_url",
-          "created_at"
-        ],
-        "title": "MediaItemResource"
       },
       "MonthlyLimitData": {
         "type": "object",
@@ -7863,6 +8684,85 @@
           "day"
         ],
         "title": "StoreCalendarEventRequest"
+      },
+      "StoreCallLinkRequest": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 2000
+          },
+          "host_email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "email",
+            "description": "Who holds the meeting — not who owns the token. A booking system\ncreates appointments for several people, and the link belongs in\nthe meeting list of the person who was booked.",
+            "maxLength": 255
+          },
+          "scheduled_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "duration_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 1440
+          },
+          "type": {
+            "$ref": "#/components/schemas/CallLinkType"
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/CallLinkVisibility"
+          },
+          "guests_allowed": {
+            "type": "boolean"
+          },
+          "waiting_room": {
+            "type": "boolean"
+          },
+          "max_participants": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 2,
+            "maximum": 500
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "external_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The appointment's id in the calling system. Without it the link\nis only addressable by the Kibi id returned here.",
+            "maxLength": 255
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "StoreCallLinkRequest"
       },
       "StoreDmsDocumentRequest": {
         "type": "object",
@@ -8068,40 +8968,6 @@
           "clock_in"
         ],
         "title": "StoreTimeEntryRequest"
-      },
-      "StoreWebhookEndpointRequest": {
-        "type": "object",
-        "description": "Dieselben Regeln wie die v2-Verwaltung, plus die external_id.\n\nDie ist hier Pflicht und nicht optional: ohne Mapping gehoert der Endpunkt\nniemandem, und die API koennte ihn danach weder finden noch loeschen.",
-        "properties": {
-          "name": {
-            "type": "string",
-            "maxLength": 255
-          },
-          "url": {
-            "type": "string",
-            "format": "uri",
-            "maxLength": 2048
-          },
-          "external_id": {
-            "type": "string",
-            "maxLength": 255
-          },
-          "events": {
-            "type": "array",
-            "items": {
-              "description": "Rule::enum und nicht Rule::in: die Fehlermeldung nennt dann den\nerlaubten Wertebereich, statt nur \"ist ungueltig\" zu sagen.",
-              "$ref": "#/components/schemas/WebhookEvent"
-            },
-            "minItems": 1
-          }
-        },
-        "required": [
-          "name",
-          "url",
-          "external_id",
-          "events"
-        ],
-        "title": "StoreWebhookEndpointRequest"
       },
       "StoreWikiPageRequest": {
         "type": "object",
@@ -8448,6 +9314,48 @@
         },
         "title": "UpdateCalendarEventRequest"
       },
+      "UpdateCallLinkRequest": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 2000
+          },
+          "scheduled_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "duration_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 1440
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "is_active": {
+            "type": "boolean"
+          }
+        },
+        "title": "UpdateCallLinkRequest"
+      },
       "UpdatePostRequest": {
         "type": "object",
         "properties": {
@@ -8564,39 +9472,6 @@
         },
         "title": "UpdateTimeEntryRequest"
       },
-      "UpdateWebhookEndpointRequest": {
-        "type": "object",
-        "description": "Wie StoreWebhookEndpointRequest, aber ohne external_id: das Mapping wird\nbeim Anlegen vergeben und ist danach die Identitaet des Endpunkts. Es\nnachtraeglich umzuhaengen waere ein Eigentuemerwechsel per PUT.\n\nAchtung fuer kuenftige Regeln: FormRequest-Validierung laeuft VOR\n`WebhookEndpointController::ownedEndpoint()`. Die 404-statt-403-Zusage fuer\neinen fremden oder UI-angelegten Endpunkt gilt nur, solange keine Regel\nhier ressourcenbewusst ist — eine `Rule::unique()` etwa, die gegen DIESEN\nEndpunkt prueft, wuerde ueber ihren Fehlertext zu einer Existenz-Oracle:\nein Aufrufer koennte am Validierungsverhalten ablesen, ob eine ULID\nueberhaupt existiert, bevor das Eigentum je geprueft wurde.",
-        "properties": {
-          "name": {
-            "type": "string",
-            "maxLength": 255
-          },
-          "url": {
-            "type": "string",
-            "format": "uri",
-            "maxLength": 2048
-          },
-          "is_active": {
-            "type": "boolean",
-            "description": "Whether deliveries should be sent. Optional: leave it out and the\nendpoint keeps whatever state it already had — omitting this field\ndoes NOT mean \"turn it off\". Send `true` explicitly to bring an\nendpoint Kibi auto-disabled after repeated failures back into\nservice; that is also the only way this request resets the\nfailure counter and the disabled timestamp."
-          },
-          "events": {
-            "type": "array",
-            "items": {
-              "description": "Rule::enum und nicht Rule::in: die Fehlermeldung nennt dann den\nerlaubten Wertebereich, statt nur \"ist ungueltig\" zu sagen.",
-              "$ref": "#/components/schemas/WebhookEvent"
-            },
-            "minItems": 1
-          }
-        },
-        "required": [
-          "name",
-          "url",
-          "events"
-        ],
-        "title": "UpdateWebhookEndpointRequest"
-      },
       "UpdateWikiPageRequest": {
         "type": "object",
         "properties": {
@@ -8671,6 +9546,14 @@
               "string",
               "null"
             ]
+          },
+          "rrule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An RRULE string (`FREQ=WEEKLY;BYDAY=MO,WE`) describing the recurrence, or omit for\na one-off event. Sending an explicit `null` clears an existing series on update.",
+            "maxLength": 500
           },
           "notify": {
             "type": "boolean",
@@ -8823,6 +9706,187 @@
         "type": "string",
         "title": "UserResource"
       },
+      "WikiPageResource": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string",
+            "description": "TipTap JSON by default; an HTML or Markdown string when `?format=` asks for one."
+          },
+          "status": {
+            "type": "string"
+          },
+          "parent_id": {
+            "type": "string"
+          },
+          "external_ref": {
+            "anyOf": [
+              {
+                "description": "Read-only, filled in by Kibi: how this resource is mapped to an object in the calling token's integration, or null when there is no mapping. You never send this block — to create or change a mapping, use the by-external-id endpoints.",
+                "$ref": "#/components/schemas/ExternalReferenceResource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "author": {
+            "$ref": "#/components/schemas/AuthorResource"
+          },
+          "reading_time": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "slug",
+          "content",
+          "status",
+          "parent_id",
+          "external_ref",
+          "reading_time",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "WikiPageResource"
+      },
+      "WorkScheduleApiData": {
+        "type": "object",
+        "additionalProperties": {},
+        "title": "WorkScheduleApiData"
+      },
+      "MediaItemResource": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "file_name": {
+            "type": "string"
+          },
+          "mime_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size": {
+            "type": "integer"
+          },
+          "url": {
+            "type": "string"
+          },
+          "preview_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "file_name",
+          "mime_type",
+          "size",
+          "url",
+          "preview_url",
+          "created_at"
+        ],
+        "title": "MediaItemResource"
+      },
+      "StoreWebhookEndpointRequest": {
+        "type": "object",
+        "description": "Dieselben Regeln wie die v2-Verwaltung, plus die external_id.\n\nDie ist hier Pflicht und nicht optional: ohne Mapping gehoert der Endpunkt\nniemandem, und die API koennte ihn danach weder finden noch loeschen.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "maxLength": 2048
+          },
+          "external_id": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "description": "Rule::enum und nicht Rule::in: die Fehlermeldung nennt dann den\nerlaubten Wertebereich, statt nur \"ist ungueltig\" zu sagen.",
+              "$ref": "#/components/schemas/WebhookEvent"
+            },
+            "minItems": 1
+          }
+        },
+        "required": [
+          "name",
+          "url",
+          "external_id",
+          "events"
+        ],
+        "title": "StoreWebhookEndpointRequest"
+      },
+      "UpdateWebhookEndpointRequest": {
+        "type": "object",
+        "description": "Wie StoreWebhookEndpointRequest, aber ohne external_id: das Mapping wird\nbeim Anlegen vergeben und ist danach die Identitaet des Endpunkts. Es\nnachtraeglich umzuhaengen waere ein Eigentuemerwechsel per PUT.\n\nAchtung fuer kuenftige Regeln: FormRequest-Validierung laeuft VOR\n`WebhookEndpointController::ownedEndpoint()`. Die 404-statt-403-Zusage fuer\neinen fremden oder UI-angelegten Endpunkt gilt nur, solange keine Regel\nhier ressourcenbewusst ist — eine `Rule::unique()` etwa, die gegen DIESEN\nEndpunkt prueft, wuerde ueber ihren Fehlertext zu einer Existenz-Oracle:\nein Aufrufer koennte am Validierungsverhalten ablesen, ob eine ULID\nueberhaupt existiert, bevor das Eigentum je geprueft wurde.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "maxLength": 2048
+          },
+          "is_active": {
+            "type": "boolean",
+            "description": "Whether deliveries should be sent. Optional: leave it out and the\nendpoint keeps whatever state it already had — omitting this field\ndoes NOT mean \"turn it off\". Send `true` explicitly to bring an\nendpoint Kibi auto-disabled after repeated failures back into\nservice; that is also the only way this request resets the\nfailure counter and the disabled timestamp."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "description": "Rule::enum und nicht Rule::in: die Fehlermeldung nennt dann den\nerlaubten Wertebereich, statt nur \"ist ungueltig\" zu sagen.",
+              "$ref": "#/components/schemas/WebhookEvent"
+            },
+            "minItems": 1
+          }
+        },
+        "required": [
+          "name",
+          "url",
+          "events"
+        ],
+        "title": "UpdateWebhookEndpointRequest"
+      },
       "WebhookEndpointResource": {
         "type": "object",
         "properties": {
@@ -8928,71 +9992,6 @@
           "wiki_page.deleted"
         ],
         "title": "WebhookEvent"
-      },
-      "WikiPageResource": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "title": {
-            "type": "string"
-          },
-          "slug": {
-            "type": "string"
-          },
-          "content": {
-            "type": "string",
-            "description": "TipTap JSON by default; an HTML or Markdown string when `?format=` asks for one."
-          },
-          "status": {
-            "type": "string"
-          },
-          "parent_id": {
-            "type": "string"
-          },
-          "external_ref": {
-            "anyOf": [
-              {
-                "description": "Read-only, filled in by Kibi: how this resource is mapped to an object in the calling token's integration, or null when there is no mapping. You never send this block — to create or change a mapping, use the by-external-id endpoints.",
-                "$ref": "#/components/schemas/ExternalReferenceResource"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "author": {
-            "$ref": "#/components/schemas/AuthorResource"
-          },
-          "reading_time": {
-            "type": "string"
-          },
-          "created_at": {
-            "type": "string"
-          },
-          "updated_at": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "title",
-          "slug",
-          "content",
-          "status",
-          "parent_id",
-          "external_ref",
-          "reading_time",
-          "created_at",
-          "updated_at"
-        ],
-        "title": "WikiPageResource"
-      },
-      "WorkScheduleApiData": {
-        "type": "object",
-        "additionalProperties": {},
-        "title": "WorkScheduleApiData"
       }
     },
     "responses": {
