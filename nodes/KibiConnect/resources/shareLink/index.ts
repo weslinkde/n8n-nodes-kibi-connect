@@ -262,6 +262,6 @@ export const shareLinkDescription: INodeProperties[] = [
 		routing: { request: { body: { message: '={{ $value || undefined }}' } } },
 	},
 
-	...filesReturnAll(R, 'getAll', 'cursor'),
-	...filesReturnAll(R, 'getAccesses', 'cursor'),
+	...filesReturnAll(R, 'getAll'),
+	...filesReturnAll(R, 'getAccesses'),
 ];

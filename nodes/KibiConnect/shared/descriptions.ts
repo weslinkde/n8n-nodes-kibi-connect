@@ -1,4 +1,4 @@
-import type { IDataObject, INodeProperties, PostReceiveAction } from 'n8n-workflow';
+import type { INodeProperties, PostReceiveAction } from 'n8n-workflow';
 
 /**
  * Kibi wraps every collection in `{ data, links, meta }`.
@@ -30,7 +30,7 @@ export const emptySuccess: PostReceiveAction[] = [
 ];
 
 /**
- * The `Return All` / `Limit` pair for a list operation.
+ * The `Return All` / `Limit` pair for a v1 list operation.
  *
  * Kibi paginates with `page` and `limit` and reports `meta.current_page` and
  * `meta.last_page` — verified against the API rather than assumed. The `limit`
@@ -38,47 +38,7 @@ export const emptySuccess: PostReceiveAction[] = [
  * request silently gets you 50; walking the pages is the only way to more.
  */
 export function returnAll(resource: string, operation: string): INodeProperties[] {
-	const show = { resource: [resource], operation: [operation] };
-
-	return [
-		{
-			displayName: 'Return All',
-			name: 'returnAll',
-			type: 'boolean',
-			default: false,
-			description: 'Whether to return all results or only up to a given limit',
-			displayOptions: { show },
-			routing: {
-				operations: {
-					pagination: {
-						type: 'generic',
-						properties: {
-							continue:
-								'={{ $response.body.meta.current_page < $response.body.meta.last_page }}',
-							request: {
-								qs: {
-									page: '={{ $pageCount + 1 }}',
-									limit: 50,
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-		{
-			displayName: 'Limit',
-			name: 'limit',
-			type: 'number',
-			typeOptions: { minValue: 1, maxValue: 50 },
-			default: 50,
-			description: 'Max number of results to return',
-			displayOptions: { show: { ...show, returnAll: [false] } },
-			routing: {
-				request: { qs: { limit: '={{ $value }}' } },
-			},
-		},
-	];
+	return returnAllFields(resource, operation, 50);
 }
 
 /**
@@ -95,41 +55,26 @@ export const FILES_BASE_URL = '={{$credentials.baseUrl}}/api/v2';
 /**
  * The `Return All` / `Limit` pair for a Files API list operation.
  *
- * The Files API pages two ways. Most lists use the Laravel page envelope
- * (`meta.current_page` / `meta.last_page`, `?page=`); the share-link
- * management view and the access log use a cursor envelope
- * (`meta.next_cursor`, `?cursor=`). The page size ceiling is 100 either way.
- *
- * Two details of the routing engine shape the expressions below. First, the
- * pagination request replaces the query string wholesale rather than merging
- * into it — so the filters the operation already set (`sort`, `q`, `type`)
- * have to be spread back in from `$request.qs`, or the second page would come
- * back unfiltered. Second, `$response` is empty on the first request, so
- * everything read from it is optional-chained.
+ * Same pair as on v1, with the Files API's page size ceiling of 100. Which
+ * envelope a list pages with — page numbers on most lists, a cursor on the
+ * share-link listings — is recognised from the response and needs no saying
+ * here.
  */
-export function filesReturnAll(
-	resource: string,
-	operation: string,
-	envelope: 'page' | 'cursor',
-): INodeProperties[] {
+export function filesReturnAll(resource: string, operation: string): INodeProperties[] {
+	return returnAllFields(resource, operation, 100);
+}
+
+/**
+ * Neither parameter drives the paging itself. The walk over the pages lives
+ * in `kibiRoutingRequest` (see `shared/routing.ts`), which runs around every
+ * request of the node and reads `returnAll` from the parameters — the
+ * declarative pagination block is not used, because it cannot be combined
+ * with the error handling that function exists for. What the parameters do
+ * is set the page size: the largest one the API allows when everything is
+ * wanted, the requested one otherwise.
+ */
+function returnAllFields(resource: string, operation: string, ceiling: number): INodeProperties[] {
 	const show = { resource: [resource], operation: [operation] };
-
-	// The whole query string is one expression that resolves to an object.
-	// The type says IDataObject, but the routing engine resolves any string
-	// starting with `=` before it looks at the shape — the object form is the
-	// only way to spread `$request.qs` back in.
-	const qs =
-		envelope === 'page'
-			? '={{ ({ ...$request.qs, limit: 100, page: ($response.body?.meta?.current_page ?? 0) + 1 }) }}'
-			: '={{ ({ ...$request.qs, limit: 100, cursor: $response.body?.meta?.next_cursor ?? undefined }) }}';
-
-	const pagination = {
-		continue:
-			envelope === 'page'
-				? '={{ $response.body.meta.current_page < $response.body.meta.last_page }}'
-				: '={{ !!$response.body.meta.next_cursor }}',
-		request: { qs: qs as unknown as IDataObject },
-	};
 
 	return [
 		{
@@ -140,20 +85,14 @@ export function filesReturnAll(
 			description: 'Whether to return all results or only up to a given limit',
 			displayOptions: { show },
 			routing: {
-				send: { paginate: '={{ $value }}' },
-				operations: {
-					pagination: {
-						type: 'generic',
-						properties: pagination,
-					},
-				},
+				request: { qs: { limit: `={{ $value ? ${ceiling} : undefined }}` } },
 			},
 		},
 		{
 			displayName: 'Limit',
 			name: 'limit',
 			type: 'number',
-			typeOptions: { minValue: 1, maxValue: 100 },
+			typeOptions: { minValue: 1, maxValue: ceiling },
 			default: 50,
 			description: 'Max number of results to return',
 			displayOptions: { show: { ...show, returnAll: [false] } },

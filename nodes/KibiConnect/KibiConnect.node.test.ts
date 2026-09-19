@@ -2,6 +2,7 @@ import type { INodeProperties, INodePropertyOptions } from 'n8n-workflow';
 import { describe, expect, it } from 'vitest';
 
 import { KibiConnect } from './KibiConnect.node';
+import { kibiRoutingRequest } from './shared/routing';
 
 const description = new KibiConnect().description;
 const properties = description.properties;
@@ -161,6 +162,75 @@ describe('the node description', () => {
 			);
 
 			expect(field, `${resource}.${operation} has no binary input field`).toBeDefined();
+		}
+	});
+});
+
+describe('the request executor', () => {
+	const unwrapData = [{ type: 'rootProperty', properties: { property: 'data' } }];
+
+	// Both halves are needed for kibiRoutingRequest to run at all: the
+	// routing engine calls the pagination function only when `paginate` is
+	// set by a displayed parameter, and the Resource parameter is the one
+	// every operation displays.
+	it('runs every request through kibiRoutingRequest', () => {
+		expect(description.requestOperations?.pagination).toBe(kibiRoutingRequest);
+		expect(properties[0].name).toBe('resource');
+		expect(properties[0].routing?.send?.paginate).toBe(true);
+	});
+
+	// The executor unwraps `data` itself while paging, so a list operation
+	// that post-processed its records any other way would come out different
+	// with Return All on than off.
+	it('only pages operations that unwrap data and nothing else', () => {
+		const returnAllFields = properties.filter((property) => property.name === 'returnAll');
+		expect(returnAllFields.length).toBeGreaterThanOrEqual(20);
+
+		for (const field of returnAllFields) {
+			const resource = (field.displayOptions?.show?.resource as string[])[0];
+			const operation = (field.displayOptions?.show?.operation as string[])[0];
+			const operationProperty = operationProperties.find(
+				(property) => (property.displayOptions?.show?.resource as string[])[0] === resource,
+			);
+			const option = (operationProperty?.options as INodePropertyOptions[]).find(
+				(candidate) => candidate.value === operation,
+			);
+
+			expect(option, `${resource}.${operation}`).toBeDefined();
+			expect(option?.routing?.output?.postReceive, `${resource}.${operation}`).toEqual(unwrapData);
+			expect(field.routing?.operations, `${resource}.${operation}`).toBeUndefined();
+			expect(String(field.routing?.request?.qs?.limit), `${resource}.${operation}`).toMatch(
+				/^=\{\{ \$value \? (50|100) : undefined \}\}$/,
+			);
+		}
+	});
+
+	it('paginates every v1 list that the API pages', () => {
+		const paginated = properties
+			.filter((property) => property.name === 'returnAll')
+			.map(
+				(property) =>
+					`${(property.displayOptions?.show?.resource as string[])[0]}.${(property.displayOptions?.show?.operation as string[])[0]}`,
+			);
+
+		for (const expected of [
+			'calendarEvent.getAll',
+			'callLink.getAll',
+			'chat.getConversations',
+			'chat.getMessages',
+			'document.getAll',
+			'group.getAll',
+			'group.getFiles',
+			'group.getMembers',
+			'group.getPosts',
+			'notification.getAll',
+			'post.getAll',
+			'survey.getAll',
+			'task.getAll',
+			'user.getAll',
+			'wiki.getAll',
+		]) {
+			expect(paginated, expected).toContain(expected);
 		}
 	});
 });

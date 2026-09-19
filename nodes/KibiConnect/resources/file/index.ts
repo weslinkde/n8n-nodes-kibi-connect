@@ -685,9 +685,9 @@ export const fileDescription: INodeProperties[] = [
 		routing: { request: { body: { model_id: '={{ $value }}' } } },
 	},
 
-	...filesReturnAll(R, 'getAll', 'page'),
-	...filesReturnAll(R, 'getRecent', 'page'),
-	...filesReturnAll(R, 'search', 'page'),
-	...filesReturnAll(R, 'getTrash', 'page'),
-	...filesReturnAll(R, 'getActivity', 'page'),
+	...filesReturnAll(R, 'getAll'),
+	...filesReturnAll(R, 'getRecent'),
+	...filesReturnAll(R, 'search'),
+	...filesReturnAll(R, 'getTrash'),
+	...filesReturnAll(R, 'getActivity'),
 ];

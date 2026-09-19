@@ -22,6 +22,7 @@ import { taskDescription } from './resources/task';
 import { timeTrackingDescription } from './resources/timeTracking';
 import { userDescription } from './resources/user';
 import { wikiDescription } from './resources/wiki';
+import { kibiRoutingRequest } from './shared/routing';
 
 export class KibiConnect implements INodeType {
 	description: INodeTypeDescription = {
@@ -57,12 +58,20 @@ export class KibiConnect implements INodeType {
 				'Content-Type': 'application/json',
 			},
 		},
+		// Every request of this node goes through kibiRoutingRequest: it is the
+		// only place a declarative node can catch a failed request, so the
+		// readable error messages and the Return All paging both live there.
+		// The Resource parameter below switches it on for every operation.
+		requestOperations: {
+			pagination: kibiRoutingRequest,
+		},
 		properties: [
 			{
 				displayName: 'Resource',
 				name: 'resource',
 				type: 'options',
 				noDataExpression: true,
+				routing: { send: { paginate: true } },
 				options: [
 					{
 						name: 'Calendar Event',
