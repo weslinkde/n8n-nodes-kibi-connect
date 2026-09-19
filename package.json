@@ -50,7 +50,8 @@
 			"dist/credentials/KibiConnectApi.credentials.js"
 		],
 		"nodes": [
-			"dist/nodes/KibiConnect/KibiConnect.node.js"
+			"dist/nodes/KibiConnect/KibiConnect.node.js",
+			"dist/nodes/KibiConnectTrigger/KibiConnectTrigger.node.js"
 		]
 	},
 	"devDependencies": {
