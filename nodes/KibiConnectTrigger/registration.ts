@@ -1,4 +1,5 @@
 import { describeApiError, type KibiErrorBody } from '../KibiConnect/shared/errors';
+import { extractHttpFailure } from '../KibiConnect/shared/transport';
 
 /**
  * The external id under which Kibi knows this node's endpoint.
@@ -9,42 +10,6 @@ import { describeApiError, type KibiErrorBody } from '../KibiConnect/shared/erro
  */
 export function externalIdFor(webhookId: string): string {
 	return `n8n-webhook-${webhookId}`;
-}
-
-export interface HttpFailure {
-	/** The HTTP status, or 0 when the error carried none (a network failure, a bug). */
-	status: number;
-	/** The parsed JSON body Kibi answered with, or `{}` when there was none. */
-	body: KibiErrorBody;
-}
-
-/**
- * Pulls the HTTP status and the JSON error body out of whatever the request
- * helpers threw.
- *
- * The shape relied on, verified against n8n-workflow 2.39.1
- * (`dist/cjs/errors/node-api.error.js`): `httpRequestWithAuthentication` wraps
- * the underlying axios failure in a `NodeApiError`, whose constructor copies
- * `axiosError.response.status` into `httpCode` (a string) and
- * `axiosError.response.data` (the parsed body) into `context.data`. The axios
- * error itself remains reachable as `cause`, and a further wrap in a
- * `NodeOperationError` copies `context` along. Older n8n versions used the
- * `request` library, which put the body on `cause.error` / `response.body`
- * instead; both are checked so that the mapping does not silently degrade to
- * the bare status text on either side.
- */
-export function extractHttpFailure(error: unknown): HttpFailure {
-	let status = 0;
-	let body: KibiErrorBody | undefined;
-
-	let current: unknown = error;
-	for (let depth = 0; depth < 4 && isRecord(current); depth++) {
-		status ||= statusOf(current);
-		body ??= bodyOf(current);
-		current = current.cause;
-	}
-
-	return { status, body: body ?? {} };
 }
 
 export function isNotFound(error: unknown): boolean {
@@ -82,44 +47,4 @@ function isKnownAccessRefusal(body: KibiErrorBody): boolean {
 		body.error === 'IP not allowed' ||
 		body.error === 'Insufficient scope'
 	);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null;
-}
-
-function statusOf(error: Record<string, unknown>): number {
-	const response = isRecord(error.response) ? error.response : undefined;
-
-	const candidates = [
-		error.httpCode,
-		error.statusCode,
-		error.status,
-		response?.status,
-		response?.statusCode,
-	];
-
-	for (const candidate of candidates) {
-		const parsed = Number(candidate);
-		if (Number.isInteger(parsed) && parsed >= 100 && parsed <= 599) {
-			return parsed;
-		}
-	}
-
-	return 0;
-}
-
-function bodyOf(error: Record<string, unknown>): KibiErrorBody | undefined {
-	const context = isRecord(error.context) ? error.context : undefined;
-	const response = isRecord(error.response) ? error.response : undefined;
-
-	const candidates = [context?.data, response?.data, response?.body, error.error];
-
-	for (const candidate of candidates) {
-		if (isRecord(candidate) && !Array.isArray(candidate)) {
-			return candidate as KibiErrorBody;
-		}
-	}
-
-	return undefined;
 }

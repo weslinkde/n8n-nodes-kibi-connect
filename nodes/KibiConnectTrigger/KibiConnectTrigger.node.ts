@@ -9,15 +9,10 @@ import type {
 	IWebhookResponseData,
 } from 'n8n-workflow';
 
-import { kibiApiRequest } from '../KibiConnect/shared/transport';
+import { extractHttpFailure, kibiApiRequest } from '../KibiConnect/shared/transport';
 import { isOwnEcho, matchesSelectedEvents, type OriginBearingData } from './filter';
 import { getWebhookEvents } from './loadOptions/getWebhookEvents';
-import {
-	describeRegistrationError,
-	externalIdFor,
-	extractHttpFailure,
-	isNotFound,
-} from './registration';
+import { describeRegistrationError, externalIdFor, isNotFound } from './registration';
 import { verifyKibiSignature } from './verify';
 
 /** What Kibi POSTs; see the request shape section of its webhook guide. */

@@ -1,11 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import {
-	describeRegistrationError,
-	extractHttpFailure,
-	externalIdFor,
-	isNotFound,
-} from './registration';
+import { describeRegistrationError, externalIdFor, isNotFound } from './registration';
 
 describe('externalIdFor', () => {
 	it('prefixes the node webhook id', () => {
@@ -67,55 +62,6 @@ describe('describeRegistrationError', () => {
 		expect(describeRegistrationError(422, { message: 'The url field is required.' })).toBe(
 			'The url field is required.',
 		);
-	});
-});
-
-describe('extractHttpFailure', () => {
-	// The shape n8n-workflow's NodeApiError produces from an axios failure:
-	// `httpCode` as a string and the parsed body under `context.data`.
-	it('reads a NodeApiError built from an axios failure', () => {
-		const error = Object.assign(new Error('Your request is invalid'), {
-			httpCode: '422',
-			context: { data: { message: 'No slug.', code: 'integration_slug_missing' } },
-		});
-
-		expect(extractHttpFailure(error)).toEqual({
-			status: 422,
-			body: { message: 'No slug.', code: 'integration_slug_missing' },
-		});
-	});
-
-	// After a further NodeOperationError wrap the status lives one `cause`
-	// down; the body is copied along but must also be found when it is not.
-	it('walks the cause chain', () => {
-		const axiosLike = Object.assign(new Error('Request failed with status code 409'), {
-			response: { status: 409, data: { message: 'Taken.', code: 'external_id_taken' } },
-		});
-		const apiError = Object.assign(new Error('Conflict'), { httpCode: '409', cause: axiosLike });
-		const outer = Object.assign(new Error('Described'), { cause: apiError });
-
-		expect(extractHttpFailure(outer)).toEqual({
-			status: 409,
-			body: { message: 'Taken.', code: 'external_id_taken' },
-		});
-	});
-
-	it('reads the request-library shape older n8n versions produced', () => {
-		const error = Object.assign(new Error('403 - {"message":"Forbidden"}'), {
-			statusCode: 403,
-			error: { message: 'Forbidden' },
-		});
-
-		expect(extractHttpFailure(error)).toEqual({ status: 403, body: { message: 'Forbidden' } });
-	});
-
-	it('reports nothing for a network failure', () => {
-		expect(extractHttpFailure(new Error('ECONNREFUSED'))).toEqual({ status: 0, body: {} });
-		expect(extractHttpFailure(undefined)).toEqual({ status: 0, body: {} });
-	});
-
-	it('ignores an httpCode that is not a status', () => {
-		expect(extractHttpFailure({ httpCode: 'ECONNRESET' }).status).toBe(0);
 	});
 });
 
