@@ -63,7 +63,7 @@ export const notificationDescription: INodeProperties[] = [
 
 	{
 		displayName:
-			'Kibi decides when and how this reaches people: do-not-disturb, quiet hours and each person\'s own push settings all apply. A notification sent at 23:00 to somebody with quiet hours is not lost, but it does not arrive at 23:00 either. Use Chat instead if you need something to land immediately.',
+			'Kibi decides when and how this reaches people: do-not-disturb, quiet hours and each person\'s own push settings all apply. A notification sent at 23:00 to somebody with quiet hours is not lost, but it does not arrive at 23:00 either. It lands in that person\'s notification list, with a link of your choosing. The Chat resource is the other way in: it writes a message into a conversation, where it is read in the conversation and follows that conversation\'s own rules. Which one fits depends on whether the workflow has something to announce or something to say.',
 		name: 'deliveryNotice',
 		type: 'notice',
 		default: '',
