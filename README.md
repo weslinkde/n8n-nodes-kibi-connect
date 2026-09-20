@@ -32,7 +32,7 @@ conversations, group types and absence types load their options from your tenant
 | Share Link | Public links to files and folders: send, update, revoke, read the access log |
 | Shared Wiki | Wiki subtrees published for the outside world, including their images |
 | Survey | Published surveys and their answer options (read-only) |
-| Task | Work items on a board; upsert by external ID |
+| Task | Work items on a board, with any number of assignees; upsert by external ID |
 | Time Tracking | Clock in and out, time entries, absences, balances, absence types, work schedules |
 | User | The employee directory (no private data) |
 | Wiki Page | Knowledge base pages; upsert by external ID |
@@ -253,6 +253,59 @@ defaults to **HTML** on both the way in (*Content Format*) and the way out (*Rea
 on the same fields. HTML and Markdown are converted at the boundary, and anything Kibi has no
 element for is dropped in that conversion — a round trip does not have to give back exactly
 what it was handed.
+
+## Tasks and assignees
+
+A task in Kibi belongs to any number of people, and the node has two fields for that:
+*Assignee* picks one person from the directory, *Additional Assignees* takes the rest as a
+comma-separated list of user IDs — an expression returning an array works too. The two are
+merged into the API's `assignees` list, so the person in the picker is always assigned;
+filling both fields means both people. A workflow that only ever used *Assignee* keeps
+sending exactly what it sent before.
+
+Two things worth knowing:
+
+- Assigning on *Update* replaces the whole list. The people you name are the people the task
+  ends up with, not additions to whoever is on it already — read the task first if you mean
+  to add somebody.
+- *Upsert by External ID* creates a task without assignees. The API takes no assignees on
+  that route, so the node does not offer the fields there; assign in a second *Update* step
+  if the upsert has to end with somebody on the task.
+
+*Get Many* returns what the token owner may see: every task on a board they have access to,
+plus the personal tasks they created or were assigned. **Only Mine** narrows it to the second
+group — the tasks they created or are assigned to — which is the `mine=true` filter of the
+API and the way to ask "what did this integration put into Kibi".
+
+## Notifications and chat
+
+Two resources put something in front of a person, and they are not the same thing:
+
+- **Notification > Send** writes into the recipients' notification list, with a title, a body
+  and a link of your choosing. Kibi decides when and how it is delivered: do-not-disturb,
+  quiet hours and each person's own push settings all apply, so a notification sent at 23:00
+  to somebody with quiet hours is not lost but does not arrive at 23:00 either.
+- **Chat > Send Message** writes a message into a conversation, where it is read in that
+  conversation and follows that conversation's own rules.
+
+Which one fits depends on whether the workflow has something to announce or something to say.
+
+## Dates and time zones
+
+Every field that means a moment — *Due Date*, *Scheduled At*, *Expires At*, *Changed Since* —
+is sent as a full ISO 8601 timestamp including its time zone, so the instant the editor shows
+is the instant Kibi stores, whichever time zone n8n and the tenant sit in. Nothing has to be
+converted to UTC by hand in an expression.
+
+The day-only parameters are a different thing and stay days: the calendar's *From Date* and
+*To Date* filters and Time Tracking's *Date*, *Date From* and *Date To* are calendar days in
+the API, not moments.
+
+*Due Date* travelled as a bare calendar day until 1.0.1, cut off after a conversion to UTC.
+That dropped the time of day, and for a due date late in the evening in a tenant east of UTC
+it moved the date itself a day back. Since 1.1.0 the whole moment is sent. A workflow that
+set a due date at midnight local time therefore lands on the day it always meant — which may
+be one day later than what the same workflow produced before.
 
 ## Compatibility
 
