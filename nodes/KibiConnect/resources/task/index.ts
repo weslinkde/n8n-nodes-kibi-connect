@@ -1,5 +1,6 @@
 import type { INodeProperties } from 'n8n-workflow';
 
+import { mergeAssignees } from '../../shared/assignees';
 import { returnAll, unwrapData } from '../../shared/descriptions';
 import {
 	DATE_TIME_HINT,
@@ -37,6 +38,7 @@ export const taskDescription: INodeProperties[] = [
 				description: 'Add a task. Calling this twice creates two tasks.',
 				routing: {
 					request: { method: 'POST', url: '/tasks' },
+					send: { preSend: [mergeAssignees] },
 					output: { postReceive: unwrapData },
 				},
 			},
@@ -74,7 +76,8 @@ export const taskDescription: INodeProperties[] = [
 				name: 'Get Many',
 				value: 'getAll',
 				action: 'Get many tasks',
-				description: 'Read the tasks the token owner created or was assigned',
+				description:
+					'Read the tasks the token owner can see. Switch on Only Mine for the ones they created or are assigned to.',
 				routing: {
 					request: { method: 'GET', url: '/tasks' },
 					output: { postReceive: unwrapData },
@@ -87,6 +90,7 @@ export const taskDescription: INodeProperties[] = [
 				description: 'Change an existing task',
 				routing: {
 					request: { method: 'PUT', url: '=/tasks/{{$parameter.taskId}}' },
+					send: { preSend: [mergeAssignees] },
 					output: { postReceive: unwrapData },
 				},
 			},
@@ -115,7 +119,7 @@ export const taskDescription: INodeProperties[] = [
 
 	{
 		displayName:
-			'Get Many returns the tasks the token owner created or is assigned to — not every task in the tenant. A service account therefore sees only what was created through it or handed to it.',
+			'Get Many returns what the token owner may see: every task on a board they have access to, plus the personal tasks they created or were assigned. Switch on Only Mine to narrow it to the tasks they created or are assigned to.',
 		name: 'scopeNotice',
 		type: 'notice',
 		default: '',
@@ -186,7 +190,8 @@ export const taskDescription: INodeProperties[] = [
 		name: 'assigneeId',
 		type: 'resourceLocator',
 		default: { mode: 'list', value: '' },
-		description: 'Who the task is for. Leave empty to leave it unassigned.',
+		description:
+			'Who the task is for. Leave empty to leave it unassigned. For more than one person, add the rest under Additional Assignees — this one is kept.',
 		displayOptions: { show: { ...show, operation: ['create', 'update'] } },
 		modes: [
 			{
@@ -204,6 +209,28 @@ export const taskDescription: INodeProperties[] = [
 			},
 		],
 		routing: { request: { body: { assignee_id: '={{ $value || undefined }}' } } },
+	},
+
+	{
+		displayName: 'Additional Assignees',
+		name: 'assigneeIds',
+		type: 'string',
+		default: '',
+		placeholder: '01J8ZP9K7QW3X2YB5M4N6R8TVC,01J8ZQ2M4XB7Y9C1D3E5F7G9HJ',
+		description:
+			'Further people to assign, on top of the one picked above, as a comma-separated list of user IDs. A task can hold any number of assignees; the picker above only offers one of them.',
+		hint: 'One ID per person — an expression returning an array works too. Take the IDs from a Get Many on the User resource rather than typing them.',
+		displayOptions: { show: { ...show, operation: ['create', 'update'] } },
+		// No routing of its own: the value is folded together with Assignee
+		// into the API's `assignees` list by the operation's preSend hook.
+	},
+
+	{
+		displayName: 'Assigning on Update replaces the whole list — the people named here are the people the task ends up with, not additions to whoever is on it already.',
+		name: 'assigneeUpdateNotice',
+		type: 'notice',
+		default: '',
+		displayOptions: { show: { ...show, operation: ['update'] } },
 	},
 
 	{
@@ -234,6 +261,17 @@ export const taskDescription: INodeProperties[] = [
 			'The group whose board the task belongs to. A task without one is visible to its creator and assignees only.',
 		displayOptions: { show: { ...show, operation: writeOps } },
 		routing: { request: { body: { group_id: '={{ $value || undefined }}' } } },
+	},
+
+	{
+		displayName: 'Only Mine',
+		name: 'mine',
+		type: 'boolean',
+		default: false,
+		description:
+			'Whether to return only the tasks the token owner created or is assigned to, instead of those plus every task on a board they can see',
+		displayOptions: { show: { ...show, operation: ['getAll'] } },
+		routing: { request: { qs: { mine: '={{ $value ? "true" : undefined }}' } } },
 	},
 
 	{
