@@ -2,7 +2,7 @@ import type { INodeProperties } from 'n8n-workflow';
 
 import { downloadBinary, uploadBinary } from '../../shared/binary';
 import { FILES_BASE_URL, filesReturnAll, unwrapData } from '../../shared/descriptions';
-import { ulidField } from '../../shared/fields';
+import { DATE_TIME_HINT, ulidField } from '../../shared/fields';
 import { contextFields, itemListFilters } from './shared';
 
 const R = 'file';
@@ -627,6 +627,7 @@ export const fileDescription: INodeProperties[] = [
 		default: '',
 		description:
 			'When the link stops working. Must lie in the future. Leave empty for a link without expiry.',
+		hint: DATE_TIME_HINT,
 		displayOptions: { show: { ...show, operation: ['createShareLink'] } },
 		routing: {
 			request: {

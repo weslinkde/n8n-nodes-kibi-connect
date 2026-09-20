@@ -1,7 +1,7 @@
 import type { INodeProperties } from 'n8n-workflow';
 
 import { returnAll, unwrapData } from '../../shared/descriptions';
-import { conditionalWriteField, ulidField } from '../../shared/fields';
+import { DATE_TIME_HINT, conditionalWriteField, ulidField } from '../../shared/fields';
 
 const R = 'callLink';
 const show = { resource: [R] };
@@ -144,7 +144,12 @@ export const callLinkDescription: INodeProperties[] = [
 				default: '',
 				description:
 					'When the link stops working. A one-time link with a scheduled time expires an hour after the meeting ends unless set here.',
-				routing: { request: { body: { expires_at: '={{ $value }}' } } },
+				hint: DATE_TIME_HINT,
+				routing: {
+					request: {
+						body: { expires_at: '={{ $value ? new Date($value).toISOString() : undefined }}' },
+					},
+				},
 			},
 			{
 				displayName: 'External ID',
@@ -188,7 +193,12 @@ export const callLinkDescription: INodeProperties[] = [
 				type: 'dateTime',
 				default: '',
 				description: 'When the meeting takes place',
-				routing: { request: { body: { scheduled_at: '={{ $value }}' } } },
+				hint: DATE_TIME_HINT,
+				routing: {
+					request: {
+						body: { scheduled_at: '={{ $value ? new Date($value).toISOString() : undefined }}' },
+					},
+				},
 			},
 			{
 				displayName: 'Type',
@@ -264,7 +274,12 @@ export const callLinkDescription: INodeProperties[] = [
 				type: 'dateTime',
 				default: '',
 				description: 'When the link stops working',
-				routing: { request: { body: { expires_at: '={{ $value }}' } } },
+				hint: DATE_TIME_HINT,
+				routing: {
+					request: {
+						body: { expires_at: '={{ $value ? new Date($value).toISOString() : undefined }}' },
+					},
+				},
 			},
 			{
 				displayName: 'Scheduled At',
@@ -272,7 +287,12 @@ export const callLinkDescription: INodeProperties[] = [
 				type: 'dateTime',
 				default: '',
 				description: 'When the meeting takes place',
-				routing: { request: { body: { scheduled_at: '={{ $value }}' } } },
+				hint: DATE_TIME_HINT,
+				routing: {
+					request: {
+						body: { scheduled_at: '={{ $value ? new Date($value).toISOString() : undefined }}' },
+					},
+				},
 			},
 			{
 				displayName: 'Title',

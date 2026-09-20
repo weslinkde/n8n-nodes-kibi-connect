@@ -1,7 +1,7 @@
 import type { INodeProperties } from 'n8n-workflow';
 
 import { FILES_BASE_URL, filesReturnAll, unwrapData } from '../../shared/descriptions';
-import { ulidField } from '../../shared/fields';
+import { DATE_TIME_HINT, ulidField } from '../../shared/fields';
 
 const R = 'shareLink';
 const show = { resource: [R] };
@@ -202,6 +202,7 @@ export const shareLinkDescription: INodeProperties[] = [
 				default: '',
 				description:
 					'When the link stops working. Must lie in the future. Leave empty to remove the expiry.',
+				hint: DATE_TIME_HINT,
 				routing: {
 					request: {
 						body: { expires_at: '={{ $value ? new Date($value).toISOString() : null }}' },

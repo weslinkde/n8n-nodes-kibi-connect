@@ -2,6 +2,7 @@ import type { INodeProperties } from 'n8n-workflow';
 
 import { returnAll, unwrapData } from '../../shared/descriptions';
 import {
+	DATE_TIME_HINT,
 	changeScanFields,
 	conditionalWriteField,
 	contentFormatField,
@@ -211,10 +212,14 @@ export const taskDescription: INodeProperties[] = [
 		type: 'dateTime',
 		default: '',
 		description: 'When the task is due',
+		hint: DATE_TIME_HINT,
 		displayOptions: { show: { ...show, operation: writeOps } },
 		routing: {
 			request: {
-				body: { due_date: '={{ $value ? new Date($value).toISOString().slice(0, 10) : undefined }}' },
+				// The whole moment, not the date half of it: cutting the string
+				// after ten characters dropped the time and, for anything after
+				// 22:00 in a UTC+2 tenant, moved the due date a day back.
+				body: { due_date: '={{ $value ? new Date($value).toISOString() : undefined }}' },
 			},
 		},
 	},

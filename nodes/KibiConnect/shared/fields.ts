@@ -5,6 +5,18 @@ const ULID_PATTERN = '^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$';
 const ULID_EXAMPLE = '01J8ZP9K7QW3X2YB5M4N6R8TVC';
 
 /**
+ * What every date and time field of this node says about its value.
+ *
+ * The editor hands over a moment, not a wall-clock reading, and the node
+ * sends it on as ISO 8601 with its offset — so a workflow running in one time
+ * zone and a tenant in another still mean the same instant. The sentence is
+ * shared rather than retyped per field, because the one thing worse than no
+ * hint is four hints that word the same rule differently.
+ */
+export const DATE_TIME_HINT =
+	'Sent as a full ISO 8601 timestamp including its time zone, so the moment means the same in n8n and in Kibi.';
+
+/**
  * An identifier field for a record the node cannot offer a picker for yet.
  *
  * The validation is not decoration: a mistyped ULID reaches the API as a
@@ -129,8 +141,13 @@ export function changeScanFields(resource: string, operation: string): INodeProp
 			default: '',
 			description:
 				'Return only records changed after this moment. Combine with sorting by Updated At and move the watermark forward after each run.',
+			hint: DATE_TIME_HINT,
 			displayOptions: { show },
-			routing: { request: { qs: { updated_since: '={{ $value || undefined }}' } } },
+			routing: {
+				request: {
+					qs: { updated_since: '={{ $value ? new Date($value).toISOString() : undefined }}' },
+				},
+			},
 		},
 		{
 			displayName: 'Sort By',
