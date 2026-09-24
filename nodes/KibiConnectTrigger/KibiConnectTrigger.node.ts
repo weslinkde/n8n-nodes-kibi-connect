@@ -68,6 +68,30 @@ export class KibiConnectTrigger implements INodeType {
 					'Whether to create the webhook endpoint in Kibi when the workflow is activated and remove it again when it is deactivated. Requires a token with the webhooks:write scope, an integration slug, and a system administrator as its owner. Switch off to register it by hand instead.',
 			},
 			{
+				displayName:
+					'Automatic registration needs all three at once: the token carries webhooks:write, the person it belongs to is a system administrator, and the token has an integration slug. The scope on its own is not enough, and the 403 you get back does not say which of the three is missing.',
+				name: 'autoRegisterNotice',
+				type: 'notice',
+				default: '',
+				displayOptions: {
+					show: {
+						autoRegister: [true],
+					},
+				},
+			},
+			{
+				displayName:
+					'Manual setup: copy this node\'s Production URL, then create an endpoint under Administration > Webhook endpoints in Kibi with that URL and the events selected below. Kibi shows the signing secret once, on save — paste it into the field below. There is no way to read it back; if it is lost, delete the endpoint and create a new one.',
+				name: 'manualSetupNotice',
+				type: 'notice',
+				default: '',
+				displayOptions: {
+					show: {
+						autoRegister: [false],
+					},
+				},
+			},
+			{
 				displayName: 'Webhook Secret',
 				name: 'manualSecret',
 				type: 'string',
@@ -101,6 +125,18 @@ export class KibiConnectTrigger implements INodeType {
 				default: true,
 				description:
 					'Whether to drop events this integration caused itself. Leave on for any workflow that also writes to Kibi — without it, writing triggers the webhook, which triggers the write again.',
+			},
+			{
+				displayName:
+					'This needs the Integration Slug filled in on the credential. Without it the node cannot tell its own writes apart from anyone else\'s and passes them through — so the loop it is meant to break stays open.',
+				name: 'loopBreakerNotice',
+				type: 'notice',
+				default: '',
+				displayOptions: {
+					show: {
+						ignoreOwnWrites: [true],
+					},
+				},
 			},
 		],
 	};
